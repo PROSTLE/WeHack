@@ -1,0 +1,45 @@
+/* Bundled typefaces. Loaded from disk, never from a network — the renderer's
+ * content security policy forbids remote origins entirely.
+ *
+ * Licensing, verified at source before bundling:
+ *   Bricolage Grotesque — SIL Open Font License 1.1
+ *     Copyright 2022 The Bricolage Grotesque Project Authors
+ *     Full text: fonts/LICENSE-BricolageGrotesque-OFL.txt
+ *   Geist and Geist Mono — SIL Open Font License 1.1
+ *     Copyright (c) 2023 Vercel, in collaboration with basement.studio
+ *     Full text: fonts/LICENSE-Geist-OFL.txt
+ *
+ * The OFL permits bundling and redistribution in an application, including
+ * commercially, provided the licence text travels with the fonts. It does.
+ *
+ * Every face has a real fallback stack, so the interface stays legible if a
+ * font file is ever missing.
+ */
+
+@font-face {
+  font-family: 'Bricolage Grotesque';
+  src: url('../fonts/BricolageGrotesque-Variable.ttf') format('truetype-variations');
+  font-weight: 200 800;
+  font-stretch: 75% 100%;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist';
+  src: url('../fonts/Geist-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('../fonts/GeistMono-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+/* Bricolage is used large and tight — the hero numeral and panel headings —
+ * and never below 20px, where its character stops helping and starts costing
+ * legibility. Monospace is for tabular data only: byte sizes, paths, hashes.
+ * It is never used for labels, eyebrows, or badges.
+ */

@@ -2,15 +2,12 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // You'll need to set your Gemini API key in process.env.GEMINI_API_KEY
 // or hardcode it here for the hackathon (but be careful not to commit it publicly)
-// Load API key from config.js (localconfig) first, then fall back to env
-let _cfg = {};
-try { _cfg = require('./config'); } catch (e) { }
-const API_KEY = _cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY || "";
+const API_KEY = process.env.GEMINI_API_KEY || "YOUR_API_KEY_HERE";
 
 const genAI = new GoogleGenerativeAI(API_KEY);
 
 // We use Flash for speed (perfect for hackathons)
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 /**
  * Summarize a single file's content

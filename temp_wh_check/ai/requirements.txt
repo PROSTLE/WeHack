@@ -3,4 +3,4 @@ numpy
 pandas
 Flask
 flask-cors
-google-genai
+google-generativeai

@@ -1,0 +1,262 @@
+/* Dashboard surfaces — the statistic cards, capacity bars, session graph,
+ * profile block and recent list.
+ *
+ * The mint ramp below is a data-display accent, taken as a colour reference
+ * from the reference dashboard. It is used on charts, capacity bars and
+ * positive-state chips, and it does not touch either reserved colour:
+ *
+ *   --reclaim crimson still appears on nothing but items scheduled for deletion.
+ *   The pigment ramp still appears on nothing but the treemap and its legend.
+ *
+ * Radii remain the same two tokens. Elevation is new: the interface read as
+ * flat white, and shallow depth gives the hierarchy something to sit on.
+ */
+
+:root {
+  --mint-900: #0B5E4F;
+  --mint-700: #12897A;
+  --mint-500: #2FB89F;
+  --mint-300: #8FD8C6;
+  --mint-100: #D9F0E9;
+  --mint-050: #EFF9F6;
+}
+
+:root[data-theme="dark"] {
+  --mint-900: #7FE3CA;
+  --mint-700: #35C8A0;
+  --mint-500: #2FB89F;
+  --mint-300: #1E7768;
+  --mint-100: #17342F;
+  --mint-050: #12231F;
+
+  --lift-1: 0 1px 2px rgba(20, 26, 46, 0.05), 0 1px 1px rgba(20, 26, 46, 0.03);
+  --lift-2: 0 2px 6px rgba(20, 26, 46, 0.07), 0 1px 2px rgba(20, 26, 46, 0.04);
+  --lift-3: 0 8px 24px rgba(20, 26, 46, 0.09), 0 2px 6px rgba(20, 26, 46, 0.04);
+}
+
+/* A very slow wash from the top, so the working area is not a flat sheet. */
+body { background: linear-gradient(180deg, var(--page-top) 0px, var(--ground) 340px); }
+
+.panel { box-shadow: var(--lift-1); }
+.panel.raised { box-shadow: var(--lift-2); }
+
+/* ── statistic cards ──────────────────────────────────────────────────────── */
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  padding: 14px 15px;
+  box-shadow: var(--lift-1);
+  display: flex; flex-direction: column; gap: 9px;
+  min-width: 0;
+}
+.stat-card .stat-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 600; color: var(--ink-2);
+}
+.stat-card .stat-head .icon { color: var(--ink-3); }
+.stat-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.stat-card .stat-value {
+  font-family: var(--display);
+  font-size: 27px; font-weight: 700; letter-spacing: -0.03em; line-height: 1;
+  display: flex; align-items: baseline; gap: 5px;
+}
+.stat-card .stat-unit {
+  font-size: 13px; font-weight: 600; color: var(--ink-2); letter-spacing: 0;
+}
+.stat-card .stat-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  font-size: 10.5px; color: var(--ink-3);
+  border-top: 1px solid var(--line); padding-top: 8px;
+  white-space: nowrap;
+}
+.stat-card .stat-foot > span:first-child {
+  overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.stat-card .stat-spark {
+  margin: -2px 0 -4px;
+  line-height: 0;
+}
+.stat-card .stat-spark svg { width: 100%; height: 34px; }
+.stat-card .spark { flex: none; opacity: 0.95; }
+
+/* Five categories sit on one row at full width and wrap evenly below it. */
+@media (min-width: 1320px) {
+  .stat-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+
+.delta {
+  display: inline-flex; align-items: center; gap: 3px; flex: none;
+  padding: 2px 6px; border-radius: var(--r-control);
+  font-size: 10.5px; font-weight: 600; white-space: nowrap;
+}
+.delta.up   { background: var(--mint-100); color: var(--mint-900); }
+.delta.down { background: var(--well);     color: var(--ink-2); }
+.delta.none { background: transparent;     color: var(--ink-3); font-weight: 500; }
+
+/* ── capacity bar ─────────────────────────────────────────────────────────── */
+
+.capbar {
+  display: flex; width: 100%; gap: 2px;
+  border-radius: var(--r-control);
+  overflow: hidden; background: var(--well);
+}
+.capbar-seg { display: block; height: 100%; }
+
+.cap-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin-bottom: 9px;
+}
+.cap-head .cap-title { font-weight: 600; }
+.cap-head .cap-usage { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.cap-head .cap-usage strong { color: var(--ink); }
+.cap-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 11px; font-size: 12px; }
+.cap-legend .legend-item { gap: 6px; }
+
+/* ── stacked columns ──────────────────────────────────────────────────────── */
+
+.cols { display: flex; align-items: flex-end; justify-content: space-around; gap: 12px; padding-top: 6px; }
+.col { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+.col-stack { display: flex; flex-direction: column; justify-content: flex-end; width: 52px; gap: 2px; }
+.col-seg { display: block; width: 100%; border-radius: 2px; }
+.col-total { font-family: var(--mono); font-size: 11px; color: var(--ink-2); font-weight: 600; }
+.col-label { font-size: 11px; color: var(--ink-3); }
+
+/* ── session and uptime ───────────────────────────────────────────────────── */
+
+.session-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr) 208px;
+  gap: 18px; align-items: start;
+}
+@media (max-width: 1180px) { .session-grid { grid-template-columns: 1fr; } }
+
+.uptime { display: flex; flex-direction: column; gap: 3px; }
+.uptime-value {
+  font-family: var(--display);
+  font-weight: 800; letter-spacing: -0.04em; line-height: 0.95; font-size: 42px;
+  display: flex; align-items: baseline; gap: 3px; color: var(--ink);
+}
+.uptime-value .u-unit {
+  font-size: 15px; font-weight: 600; color: var(--ink-2);
+  letter-spacing: 0; margin-right: 7px;
+}
+.uptime-sub { font-size: 12px; color: var(--ink-3); }
+
+.session-stats {
+  display: flex; flex-direction: column; gap: 13px;
+  background: var(--mint-050);
+  border: 1px solid var(--mint-100);
+  border-radius: var(--r-panel);
+  padding: 14px;
+}
+.session-stat { display: flex; align-items: center; gap: 11px; }
+.session-stat .ring { flex: none; }
+.session-stat .s-body { min-width: 0; }
+.session-stat .s-value { font-family: var(--mono); font-weight: 600; font-size: 13.5px; }
+.session-stat .s-label { font-size: 11px; color: var(--ink-3); }
+
+.chart-frame {
+  border: 1px solid var(--line); border-radius: var(--r-panel);
+  background: var(--panel); padding: 10px 12px 4px;
+}
+.chart-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; min-height: 168px; text-align: center;
+  color: var(--ink-3); font-size: 12px;
+  border: 1px dashed var(--line-firm); border-radius: var(--r-panel);
+  background: var(--panel); padding: 20px;
+}
+.chart-empty strong { color: var(--ink-2); font-size: 13px; }
+
+.seg-toggle { display: inline-flex; background: var(--well); border-radius: var(--r-control); padding: 2px; }
+.seg-toggle button {
+  border: 0; background: transparent; font: inherit; font-size: 12px; font-weight: 600;
+  color: var(--ink-2); padding: 4px 11px; border-radius: 3px; cursor: pointer;
+}
+.seg-toggle button[aria-pressed="true"] {
+  background: var(--panel); color: var(--ink); box-shadow: var(--lift-1);
+}
+
+/* ── drive art ────────────────────────────────────────────────────────────── */
+
+.drive-panel {
+  display: grid; grid-template-columns: 216px minmax(0, 1fr);
+  gap: 22px; align-items: center;
+}
+@media (max-width: 1180px) { .drive-panel { grid-template-columns: 1fr; } }
+svg.drive-art { width: 216px; height: 162px; }
+.drive-art-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.drive-caption {
+  display: flex; align-items: baseline; gap: 7px;
+  font-size: 12px;
+}
+.drive-caption .d-id { font-family: var(--mono); font-weight: 700; color: var(--ink); }
+.drive-caption .d-name { color: var(--ink-2); }
+.drive-caption .d-fs {
+  font-family: var(--mono); font-size: 10px; color: var(--ink-3);
+  border: 1px solid var(--line); border-radius: var(--r-control); padding: 1px 5px;
+}
+
+/* ── profile ──────────────────────────────────────────────────────────────── */
+
+.profile-chip {
+  -webkit-app-region: no-drag;
+  display: flex; align-items: center; gap: 9px;
+  padding: 3px 12px 3px 3px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--panel); cursor: default;
+}
+.avatar {
+  width: 26px; height: 26px; border-radius: 50%;
+  display: grid; place-items: center; flex: none;
+  background: var(--mint-700); color: #fff;
+  font-size: 11px; font-weight: 700;
+}
+.avatar.lg { width: 38px; height: 38px; font-size: 14px; }
+.profile-chip .p-name { font-size: 12px; font-weight: 600; line-height: 1.15; }
+.profile-chip .p-role { font-size: 10px; color: var(--ink-3); line-height: 1.15; }
+
+.rail-profile {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 10px 14px; padding: 10px;
+  background: var(--mint-050);
+  border: 1px solid var(--mint-100);
+  border-radius: var(--r-panel);
+}
+.rail-profile .p-meta { min-width: 0; }
+.rail-profile .p-name { font-weight: 600; font-size: 13px; }
+.rail-profile .p-host {
+  font-family: var(--mono); font-size: 10px; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── recent list ──────────────────────────────────────────────────────────── */
+
+.recent-row {
+  display: grid; grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  gap: 11px; align-items: center;
+  padding: 8px 0; border-bottom: 1px solid var(--line);
+}
+.recent-row:last-child { border-bottom: 0; }
+.recent-row .r-icon {
+  width: 26px; height: 26px; border-radius: var(--r-control);
+  display: grid; place-items: center;
+  background: var(--well); color: var(--ink-2);
+}
+.recent-row .r-name { font-weight: 500; font-size: 12.5px; }
+.recent-row .r-path {
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.recent-row .r-when { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.recent-row .r-size {
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}

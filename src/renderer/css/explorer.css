@@ -1,0 +1,571 @@
+/* The Files view.
+ *
+ * Explorer's proportions, in NexaFiles' palette. The row height (26px), the
+ * column order, the folders-first sort and the two-line status bar are all
+ * taken from the thing this sits next to on the taskbar, because a file
+ * manager that reinvents those makes the user re-learn what they already know.
+ *
+ * The colour rules of app.css still hold: crimson appears on deletion and
+ * nowhere else, the treemap pigments do not appear here at all, and structure
+ * is carried by borders rather than shadows.
+ */
+
+/* The view fills the stage rather than scrolling inside its padding: the list
+   scrolls, the toolbar and status bar do not. */
+.stage.stage-flush {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+}
+
+.explorer {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  background: var(--panel);
+}
+
+/* ── address bar ─────────────────────────────────────────────────────────── */
+
+.ex-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.ex-nav { display: flex; gap: 2px; flex: none; }
+
+.ex-icon-btn {
+  width: 28px; height: 28px;
+  display: grid; place-items: center;
+  border: 0; border-radius: var(--r-control);
+  background: transparent; color: var(--ink-2);
+  cursor: pointer;
+}
+.ex-icon-btn:hover:not(:disabled) { background: var(--well); color: var(--ink); }
+.ex-icon-btn:disabled { color: var(--line); cursor: default; }
+
+.ex-crumbs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--panel);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.ex-crumbs::-webkit-scrollbar { display: none; }
+
+.ex-crumb {
+  border: 0; background: transparent;
+  font: inherit; color: var(--ink-2);
+  padding: 3px 7px;
+  border-radius: var(--r-control);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ex-crumb:hover { background: var(--well); color: var(--ink); }
+.ex-crumb.current { color: var(--ink); font-weight: 600; }
+.ex-crumb.drop-target { background: var(--primary-wash); box-shadow: inset 0 0 0 1px var(--primary); }
+.ex-crumb-sep { color: var(--ink-3); display: inline-flex; align-items: center; }
+
+.ex-search {
+  flex: none;
+  width: 230px;
+  display: flex; align-items: center; gap: 6px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  color: var(--ink-3);
+}
+.ex-search:focus-within { border-color: var(--primary); color: var(--ink-2); }
+.ex-search input {
+  flex: 1; min-width: 0;
+  border: 0; background: transparent; outline: none;
+  font: inherit; color: var(--ink);
+}
+.ex-search input::-webkit-search-cancel-button { cursor: pointer; }
+
+/* ── command bar ─────────────────────────────────────────────────────────── */
+
+/* Sort and View stay put; the actions scroll under them when the window is
+   too narrow for all of them, rather than being pushed off the edge. */
+.ex-commands {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--ground);
+  flex: none;
+}
+.ex-cmd-left {
+  display: flex; align-items: center; gap: 2px;
+  flex: 1; min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ex-cmd-left::-webkit-scrollbar { display: none; }
+.ex-cmd-right {
+  display: flex; align-items: center; gap: 2px;
+  flex: none;
+  padding-left: 6px;
+  border-left: 1px solid var(--line);
+}
+
+.ex-cmd {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 9px;
+  border: 0; border-radius: var(--r-control);
+  background: transparent; color: var(--ink);
+  font: inherit; cursor: pointer;
+  white-space: nowrap;
+}
+.ex-cmd:hover:not(:disabled) { background: var(--well); }
+.ex-cmd:disabled { color: var(--ink-3); opacity: 0.5; cursor: default; }
+.ex-cmd .icon { color: var(--ink-2); }
+.ex-cmd:disabled .icon { color: var(--ink-3); }
+/* The one crimson control in this view, and only once it can actually delete. */
+.ex-cmd.danger:not(:disabled):hover { background: var(--reclaim-wash); color: var(--reclaim); }
+.ex-cmd.danger:not(:disabled):hover .icon { color: var(--reclaim); }
+
+.ex-cmd-sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; flex: none; }
+
+.ex-menu-host { position: relative; }
+.ex-menu {
+  position: absolute;
+  right: 0; top: calc(100% + 4px);
+  z-index: 40;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-pop);
+}
+.ex-menu button {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0; border-radius: var(--r-control);
+  background: transparent; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.ex-menu button:hover { background: var(--well); }
+.ex-menu-gap { width: 13px; flex: none; }
+.ex-menu-rule { height: 1px; background: var(--line); margin: 4px 2px; }
+
+/* ── contents ────────────────────────────────────────────────────────────── */
+
+.ex-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+  padding-bottom: 24px;
+}
+.ex-body:focus-visible { box-shadow: inset 0 0 0 2px var(--primary-wash); }
+
+.ex-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.ex-table thead th {
+  position: sticky; top: 0; z-index: 2;
+  text-align: left;
+  font-size: 12px; font-weight: 600; color: var(--ink-2);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.ex-table thead th:hover { background: var(--well); }
+.ex-table th.num, .ex-table td.num { text-align: right; }
+.ex-sort-arrow { color: var(--ink-3); margin-left: 2px; display: inline-flex; }
+.ex-sort-arrow .icon { width: 12px; height: 12px; }
+.ex-sort-arrow.asc .icon { transform: rotate(180deg); }
+
+/* A copy or move that is taking long enough to notice says so here. */
+.ex-busy {
+  display: flex; align-items: center; gap: 9px;
+  flex: none;
+  padding: 7px 14px;
+  background: var(--primary-wash);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.ex-busy .spinner {
+  width: 13px; height: 13px;
+  border: 2px solid var(--spinner-track); border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.ex-col-name { width: auto; }
+.ex-col-date { width: 170px; }
+.ex-col-type { width: 190px; }
+.ex-col-size { width: 110px; }
+
+.ex-table td {
+  padding: 4px 10px;
+  border-bottom: 1px solid transparent;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.ex-table td.ex-col-date, .ex-table td.ex-col-size { font-size: 12px; color: var(--ink-2); }
+.ex-table td.ex-col-type { font-size: 12px; color: var(--ink-2); }
+
+.ex-row { cursor: default; user-select: none; }
+tr.ex-row:hover { background: var(--well); }
+tr.ex-row.selected { background: var(--primary-wash); }
+tr.ex-row.selected td { border-bottom-color: transparent; }
+.ex-row.faded { opacity: 0.55; }
+.ex-row.cut { opacity: 0.45; }
+.ex-row.unreadable .ex-label { color: var(--ink-3); font-style: italic; }
+.ex-row.drop-target { box-shadow: inset 0 0 0 2px var(--primary); }
+
+.ex-col-name { display: table-cell; }
+.ex-table .ex-col-name .ex-ico,
+.ex-table .ex-col-name .ex-label { vertical-align: middle; }
+
+.ex-ico {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px;
+  margin-right: 9px;
+  color: var(--ink-2);
+  flex: none;
+}
+.ex-ico img { width: 100%; height: 100%; object-fit: contain; }
+.ex-row.selected .ex-ico { color: var(--primary); }
+
+.ex-label { overflow: hidden; text-overflow: ellipsis; }
+
+.ex-badge {
+  display: inline-flex;
+  margin-left: 6px;
+  color: var(--ink-3);
+  vertical-align: middle;
+}
+.ex-badge.caution { color: var(--caution); }
+
+.ex-rename-input {
+  font: inherit;
+  padding: 1px 4px;
+  border: 1px solid var(--primary);
+  border-radius: 2px;
+  background: var(--panel);
+  color: var(--ink);
+  outline: none;
+  min-width: 160px;
+  max-width: 100%;
+}
+
+/* ── grid layouts ────────────────────────────────────────────────────────── */
+
+.ex-grid { display: grid; gap: 4px; padding: 12px; }
+.ex-grid-icons { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
+.ex-grid-tiles { grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); }
+.ex-grid-list  { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0; }
+
+.ex-tile {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 8px;
+  border-radius: var(--r-control);
+  min-width: 0;
+}
+.ex-tile:hover { background: var(--well); }
+.ex-tile.selected { background: var(--primary-wash); }
+.ex-tile-text { display: flex; flex-direction: column; min-width: 0; }
+.ex-tile-meta { font-size: 11px; color: var(--ink-3); }
+
+.ex-grid-icons .ex-tile {
+  flex-direction: column;
+  text-align: center;
+  padding: 12px 6px;
+  gap: 8px;
+}
+.ex-grid-icons .ex-ico {
+  width: 56px; height: 56px;
+  margin: 0;
+}
+.ex-grid-icons .ex-ico .icon { width: 36px; height: 36px; }
+.ex-grid-icons .ex-label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.ex-grid-tiles .ex-ico { width: 32px; height: 32px; }
+.ex-grid-tiles .ex-ico .icon { width: 22px; height: 22px; }
+.ex-grid-tiles .ex-tile { gap: 10px; }
+
+.ex-grid-list .ex-tile { padding: 3px 8px; }
+
+/* ── states ──────────────────────────────────────────────────────────────── */
+
+.ex-empty, .ex-gate {
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center;
+  padding: 56px 28px;
+  max-width: 560px;
+  margin: 0 auto;
+  gap: 10px;
+}
+.ex-empty h3, .ex-gate h3 {
+  font-family: var(--display);
+  font-size: 19px; font-weight: 600; letter-spacing: -0.01em;
+  margin: 4px 0 0;
+}
+.ex-empty p, .ex-gate p { margin: 0; color: var(--ink-2); max-width: 56ch; }
+.ex-gate .icon { color: var(--ink-3); }
+.ex-gate button { margin-top: 10px; }
+.ex-empty .spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--line); border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.ex-more {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+}
+
+/* ── status bar ──────────────────────────────────────────────────────────── */
+
+.ex-status {
+  display: flex; align-items: center; gap: 14px;
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border-top: 1px solid var(--line);
+  background: var(--ground);
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ex-status-spacer { flex: 1; }
+.ex-status-sel { color: var(--ink); font-weight: 600; }
+
+/* ── context menu ────────────────────────────────────────────────────────── */
+
+.ex-context {
+  position: fixed;
+  z-index: 100;
+  min-width: 216px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-pop);
+}
+.ex-context button {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0; border-radius: var(--r-control);
+  background: transparent; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.ex-context button:hover:not(:disabled) { background: var(--well); }
+.ex-context button:disabled { color: var(--ink-3); cursor: default; }
+.ex-context button .icon { color: var(--ink-2); }
+.ex-context button.danger:hover { background: var(--reclaim-wash); color: var(--reclaim); }
+.ex-context button.danger:hover .icon { color: var(--reclaim); }
+
+/* ── properties ──────────────────────────────────────────────────────────── */
+
+.ex-dialog-backdrop {
+  position: fixed; inset: 0; z-index: 120;
+  background: var(--scrim);
+  display: grid; place-items: center;
+  padding: 24px;
+}
+.ex-dialog {
+  width: min(520px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-modal);
+}
+.ex-dialog > header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 14px 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.ex-dialog > header h3 {
+  flex: 1; min-width: 0;
+  margin: 0;
+  font-family: var(--display);
+  font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ex-dialog dl {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+  padding: 16px;
+}
+.ex-dialog dt { color: var(--ink-3); font-size: 12px; }
+.ex-dialog dd { margin: 0; min-width: 0; word-break: break-word; }
+.ex-dialog dd .mono { font-size: 11px; }
+.ex-dialog > footer {
+  display: flex; justify-content: flex-end;
+  padding: 12px 16px 16px;
+}
+
+/* ── sidebar: places and the folder tree ─────────────────────────────────── */
+
+/* A row is twisty + label + hover action, so the whole row carries the hover
+   and selection states rather than the label button alone. */
+.rail-row {
+  display: flex;
+  align-items: center;
+  padding-right: 6px;
+  min-width: 0;
+}
+.rail-row:hover { background: var(--well); }
+.rail-row.current {
+  background: var(--primary-wash);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+.rail-row.current .rail-place { font-weight: 600; }
+.rail-row.drop-target { box-shadow: inset 0 0 0 2px var(--primary); }
+
+.rail-place {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1;
+  padding: 5px 4px 5px 2px;
+  border: 0; background: transparent;
+  font: inherit; color: var(--ink);
+  text-align: left; cursor: pointer;
+  min-width: 0;
+}
+.rail-place .icon { color: var(--ink-2); flex: none; }
+.rail-place[aria-current="true"] .icon { color: var(--primary); }
+.rail-place .label {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rail-place .rail-free {
+  font-family: var(--mono); font-size: 10px; color: var(--ink-3);
+  flex: none;
+}
+.rail-place.locked .label { color: var(--ink-2); }
+
+.rail-twisty {
+  width: 18px; height: 18px;
+  flex: none;
+  display: grid; place-items: center;
+  border: 0; background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  border-radius: 3px;
+  margin-left: 8px;
+}
+.rail-twisty:hover { background: var(--line); color: var(--ink); }
+.rail-twisty.open .icon { transform: rotate(90deg); }
+.rail-twisty .icon { transition: transform 0.12s ease; }
+.rail-twisty.leaf { visibility: hidden; }
+
+.rail-children { display: block; }
+.rail-loading { font-size: 12px; color: var(--ink-3); padding: 4px 14px; }
+.rail-note {
+  font-size: 11px; color: var(--ink-3);
+  margin: 8px 14px 0; line-height: 1.4;
+}
+.rail-drive-bar { padding: 0 14px 6px 40px; }
+
+.rail-scan {
+  flex: none;
+  width: 22px; height: 22px;
+  display: none; place-items: center;
+  border: 0; background: transparent;
+  border-radius: 3px;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.rail-place:hover .rail-scan { display: grid; }
+.rail-scan:hover { background: var(--line); color: var(--primary); }
+
+/* ── assistant attachments ───────────────────────────────────────────────── */
+
+.aside.drop-active { outline: 2px dashed var(--primary); outline-offset: -6px; }
+
+.chat-dropzone {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-firm);
+  border-radius: var(--r-control);
+  font-size: 12px;
+  color: var(--ink-3);
+  display: flex; align-items: center; gap: 8px;
+}
+.aside.drop-active .chat-dropzone {
+  border-color: var(--primary);
+  background: var(--primary-wash);
+  color: var(--ink);
+}
+
+.chat-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 8px;
+}
+.chat-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 100%;
+  padding: 4px 6px 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--panel);
+  font-size: 12px;
+}
+.chat-chip .icon { color: var(--ink-2); flex: none; }
+.chat-chip .chip-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 150px;
+}
+.chat-chip .chip-size { color: var(--ink-3); font-family: var(--mono); font-size: 11px; }
+.chat-chip.error { border-color: var(--caution); color: var(--caution); }
+.chat-chip button {
+  border: 0; background: transparent; color: var(--ink-3);
+  cursor: pointer; padding: 2px; border-radius: 3px;
+  display: grid; place-items: center;
+}
+.chat-chip button:hover { background: var(--well); color: var(--ink); }
+
+.chat-msg .chat-files {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  margin-bottom: 5px;
+}
+.chat-msg .chat-file {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 7px;
+  border-radius: var(--r-control);
+  background: var(--well);
+  font-size: 11px;
+  color: var(--ink-2);
+}

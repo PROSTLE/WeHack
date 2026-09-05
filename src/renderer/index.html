@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!-- The renderer loads nothing over the network. Fonts are bundled locally,
+       so the content security policy can forbid every remote origin outright. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none';
+                 script-src 'self';
+                 style-src 'self' 'unsafe-inline';
+                 font-src 'self';
+                 img-src 'self' data:;
+                 connect-src 'none';
+                 form-action 'none';
+                 base-uri 'none';">
+  <title>NexaFiles</title>
+  <link rel="stylesheet" href="css/fonts.css">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/explorer.css">
+  <link rel="stylesheet" href="css/settings.css">
+</head>
+<body>
+
+  <div class="titlebar">
+    <span class="brand">NexaFiles</span>
+    <span class="scan-context" id="scan-context"></span>
+    <span class="spacer"></span>
+    <span class="footprint" id="footprint" title="NexaFiles' own memory use, measured live">—</span>
+    <div class="profile-chip" id="profile-chip" title="Signed-in account on this machine"></div>
+    <div class="win-controls">
+      <button id="win-min" aria-label="Minimise">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round"><path d="M5 12h14"/></svg>
+      </button>
+      <button id="win-max" aria-label="Maximise">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>
+      </button>
+      <button id="win-close" class="close" aria-label="Close">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="shell">
+    <nav class="rail" id="rail" aria-label="Views and locations"></nav>
+
+    <main class="stage" id="stage"></main>
+
+    <aside class="aside" aria-label="Plan and assistant">
+      <div class="aside-tabs" id="aside-tabs" role="tablist">
+        <button role="tab" data-tab="plan" aria-selected="true">Plan</button>
+        <button role="tab" data-tab="chat" aria-selected="false">Assistant</button>
+      </div>
+      <div class="aside-body" id="aside-body"></div>
+      <div class="aside-foot" id="aside-foot"></div>
+    </aside>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

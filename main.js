@@ -1,526 +1,235 @@
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron');
+'use strict';
+// NexaFiles main process.
+//
+// What is deliberately absent here, compared to the previous version:
+//   - No Python sidecar, no virtualenv bootstrap, no pip install on first launch.
+//     The application had run `execSync` to build a venv before showing a window,
+//     which blocked startup for minutes on a machine without Python. Everything
+//     that process did is now done in Node.
+//   - No API keys loaded from a file in the repository.
+
 const path = require('path');
-const fs = require('fs').promises;
-const fsSync = require('fs');
-const crypto = require('crypto');
-const os = require('os');
-const { execSync, spawn } = require('child_process');
-const sqlite3 = require('sqlite3').verbose();
-const { open } = require('sqlite');
+const { app, BrowserWindow, Menu, shell, session, nativeImage, dialog, nativeTheme } = require('electron');
 
-// Load local config (Gemini API key etc.)
-let appConfig = {};
-try { appConfig = require('./config'); } catch (e) { /* config.js not present, fine */ }
+const roots = require('./src/main/security/roots');
+const { AppState } = require('./src/main/app-state');
+const { register } = require('./src/main/ipc');
+const { Agent } = require('./src/main/llm/agent');
+const agentTools = require('./src/main/llm/tools');
 
-let mainWindow;
-let db;
-let aiServerProcess = null;
-const AI_SERVER_URL = 'http://127.0.0.1:5050';
+let mainWindow = null;
+let state = null;
 
-// ── Start the Python AI (Flask + sklearn + Gemini) server ──
-function startAIServer() {
-  const projectRoot = __dirname;
-  const aiDir = path.join(projectRoot, 'ai');
-  const serverScript = path.join(aiDir, 'classify_server.py');
+/**
+ * One copy at a time.
+ *
+ * Two instances would open the same SQLite index, the same quarantine manifest
+ * and the same settings file, and would take turns overwriting each other's
+ * work. Rather than detect that from a launcher script — window titles are a
+ * poor thing to depend on — the application refuses to be started twice: the
+ * second launch hands its arguments to the first and exits, and the first
+ * brings its window forward, which is what the person double-clicking meant.
+ *
+ * The test runner sets NEXAFILES_ALLOW_MULTIPLE so that an orphaned instance
+ * from a previous suite cannot silently prevent the next one from starting.
+ */
+const allowMultiple = process.env.NEXAFILES_ALLOW_MULTIPLE === '1';
+const hasInstanceLock = allowMultiple || app.requestSingleInstanceLock();
 
-  // Cross-platform venv python path
-  const isWin = process.platform === 'win32';
-  const venvPython = isWin
-    ? path.join(aiDir, 'venv', 'Scripts', 'python.exe')
-    : path.join(aiDir, 'venv', 'bin', 'python3');
-
-  // Determine which python to use
-  let pythonCmd = venvPython;
-  if (!fsSync.existsSync(venvPython)) {
-    console.log('[AI Server] venv not found, attempting to create it...');
-    try {
-      const sysPython = isWin ? 'python' : 'python3';
-      // Create venv
-      execSync(`${sysPython} -m venv "${path.join(aiDir, 'venv')}"`, { cwd: aiDir, stdio: 'inherit' });
-      // Install requirements
-      const pip = isWin
-        ? path.join(aiDir, 'venv', 'Scripts', 'pip.exe')
-        : path.join(aiDir, 'venv', 'bin', 'pip');
-      const reqFile = path.join(aiDir, 'requirements.txt');
-      if (fsSync.existsSync(reqFile)) {
-        execSync(`"${pip}" install -r "${reqFile}"`, { cwd: aiDir, stdio: 'inherit' });
-      }
-      pythonCmd = venvPython;
-    } catch (setupErr) {
-      console.error('[AI Server] Auto-setup failed:', setupErr.message);
-      console.log('[AI Server] Falling back to system python');
-      pythonCmd = isWin ? 'python' : 'python3';
-    }
-  }
-
-  // Pass Gemini API key(s) from config.js to child process (supports key rotation)
-  const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
-  const keys = appConfig.GEMINI_API_KEYS || (appConfig.GEMINI_API_KEY ? [appConfig.GEMINI_API_KEY] : []);
-  const validKeys = keys.filter(k => k && k !== 'YOUR_GEMINI_API_KEY_HERE' && !k.startsWith('PASTE_'));
-  if (validKeys.length > 0) {
-    env.GEMINI_API_KEYS = validKeys.join(',');
-    env.GEMINI_API_KEY = validKeys[0]; // legacy fallback
-  }
-
-  aiServerProcess = spawn(pythonCmd, [serverScript], {
-    cwd: projectRoot,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe']
+if (!hasInstanceLock) {
+  console.log('[nexafiles] already running; bringing the existing window forward.');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   });
-
-  aiServerProcess.stdout.on('data', (d) => console.log('[AI Server]', d.toString().trim()));
-  aiServerProcess.stderr.on('data', (d) => console.error('[AI Server ERR]', d.toString().trim()));
-  aiServerProcess.on('error', (e) => console.error('[AI Server] Failed to start:', e.message));
-  aiServerProcess.on('close', (code) => {
-    console.log(`[AI Server] Process exited with code ${code}`);
-    aiServerProcess = null;
-  });
-  console.log('[AI Server] Spawned PID:', aiServerProcess.pid);
-}
-
-// ── Helper: proxy a POST request to AI server ──
-async function aiPost(endpoint, body) {
-  try {
-    const resp = await fetch(`${AI_SERVER_URL}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30000)
-    });
-    return await resp.json();
-  } catch (err) {
-    console.error(`[AI IPC] ${endpoint} error:`, err.message);
-    return null;
-  }
-}
-
-
-async function initDB() {
-  const dbPath = path.join(app.getPath('userData'), 'nexafiles_index.db');
-  db = await open({
-    filename: dbPath,
-    driver: sqlite3.Database
-  });
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      path TEXT UNIQUE,
-      name TEXT,
-      isDirectory BOOLEAN,
-      size INTEGER,
-      modified TEXT,
-      created TEXT,
-      accessed TEXT,
-      extension TEXT,
-      tags TEXT,
-      type TEXT,
-      sensitivity TEXT,
-      isDuplicate BOOLEAN,
-      starred BOOLEAN DEFAULT 0
-    )
-  `);
 }
 
 function createWindow() {
+  // The window paints its own background before the document loads. Deciding
+  // the theme here, rather than in the renderer, is what stops a dark session
+  // opening with a white flash.
+  const dark = nativeTheme.shouldUseDarkColors;
+
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
+    width: 1440,
+    height: 900,
+    minWidth: 1040,
+    minHeight: 640,
     frame: false,
     titleBarStyle: 'hidden',
-    backgroundColor: '#0F172A',
+    // The porcelain ground the interface is painted on, or its dark twin.
+    backgroundColor: dark ? '#0F1219' : '#EEF1F5',
     icon: path.join(__dirname, 'assets', 'icon.png'),
+    show: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: false,          // the preload needs `require` for ipcRenderer
       preload: path.join(__dirname, 'preload.js'),
+      spellcheck: false,
     },
-    show: false,
   });
 
-  mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
-
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-  });
-
+  mainWindow.loadFile(path.join(__dirname, 'src', 'renderer', 'index.html'));
+  mainWindow.webContents.openDevTools();
+  mainWindow.once('ready-to-show', () => mainWindow.show());
   Menu.setApplicationMenu(null);
 
-  // ── SECURITY: Permission handler ──
-  // Only allow microphone access (for voice input).
-  // Deny ALL other permissions (camera, geolocation, notifications, etc.).
-  // This ensures even if the app is compromised, it cannot access anything else.
-  const { session } = require('electron');
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const allowedPermissions = ['media'];  // 'media' covers microphone
-    if (allowedPermissions.includes(permission)) {
+  // Deny every permission but one. No camera, no geolocation, no notifications,
+  // no screen capture. The single exception is the microphone, which the
+  // assistant's composer uses to take a spoken question — and even that is
+  // narrowed twice: the request must come from this window's own document, and
+  // it must ask for audio alone. A request that also wants video is a request
+  // for the camera wearing the same name, and is refused.
+  //
+  // Granting it here is not the whole of the consent. Chromium asks only once
+  // per session, so the honest gate is the button: the microphone is opened
+  // when the user presses it and closed the moment they stop, and the operating
+  // system's own recording indicator stays the final word on whether it is on.
+  const audioOnly = (details) => {
+    const types = details?.mediaTypes;
+    // An absent list is not an implicit "audio". Only an explicit audio-and-
+    // nothing-else request qualifies.
+    return Array.isArray(types) && types.length > 0 && types.every((t) => t === 'audio');
+  };
+  const isOwnWindow = (wc) => !!mainWindow && !mainWindow.isDestroyed() && wc === mainWindow.webContents;
+
+  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
+    if (permission === 'media' && isOwnWindow(wc) && audioOnly(details)) {
       callback(true);
-    } else {
-      console.warn(`Blocked permission request: ${permission}`);
-      callback(false);
+      return;
     }
+    console.warn(`[security] denied permission request: ${permission}`);
+    callback(false);
   });
 
-  // Also handle permission checks (for `navigator.permissions.query`)
-  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
-    if (permission === 'media') return true;
+  // The check handler answers `navigator.permissions.query` and decides whether
+  // device labels are visible to `enumerateDevices`. It mirrors the rule above,
+  // with the same audio-only narrowing — here the media type arrives singular.
+  session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => {
+    if (permission === 'media' && isOwnWindow(wc) && details?.mediaType === 'audio') return true;
     return false;
   });
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  // The renderer may reload itself, and nothing else. Navigating to any other
+  // document — remote or local — is either a bug or an attack, so it is refused.
+  const appDocument = path.join(__dirname, 'src', 'renderer', 'index.html');
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    let target = null;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'file:') target = decodeURIComponent(parsed.pathname).replace(/^\//, '');
+    } catch { /* unparseable; treated as foreign below */ }
+
+    const isOwnDocument = target &&
+      path.resolve(target).toLowerCase() === appDocument.toLowerCase();
+
+    if (!isOwnDocument) {
+      event.preventDefault();
+      console.warn(`[security] blocked navigation to ${url}`);
+    }
   });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    // External links open in the real browser, never in an app window.
+    if (/^https?:\/\//.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// ── IPC: Window controls ──
-ipcMain.on('win-minimize', () => mainWindow?.minimize());
-ipcMain.on('win-maximize', () => {
-  if (mainWindow?.isMaximized()) mainWindow.unmaximize();
-  else mainWindow?.maximize();
-});
-ipcMain.on('win-close', () => mainWindow?.close());
-
-// ── IPC: Home directory ──
-ipcMain.handle('get-home-dir', () => {
-  return os.homedir();
-});
-
-// ── IPC: Get Windows drives ──
-ipcMain.handle('get-drives', async () => {
+/**
+ * Startup failed before a window existed.
+ *
+ * Without this the process stayed alive with no window and no message — three
+ * background processes and nothing on screen, which is the worst possible way
+ * for an application to fail. Now the reason is shown and the app exits.
+ */
+function reportFatal(err) {
+  console.error('[nexafiles] startup failed:', err);
   try {
-    if (process.platform === 'win32') {
-      // Use wmic to enumerate logical drives
-      const raw = execSync('wmic logicaldisk get DeviceID,Size,FreeSpace,VolumeName /format:csv', { encoding: 'utf8' });
-      const lines = raw.split('\n').filter(l => l.trim() && !l.startsWith('Node'));
-      const drives = [];
-      for (const line of lines) {
-        const parts = line.trim().split(',');
-        if (parts.length >= 5) {
-          const [, deviceID, freeSpace, size, volumeName] = parts;
-          if (deviceID && deviceID.match(/^[A-Z]:$/i)) {
-            drives.push({
-              letter: deviceID.trim(),
-              name: volumeName ? volumeName.trim() : '',
-              path: deviceID.trim() + '\\',
-              totalBytes: parseInt(size) || 0,
-              freeBytes: parseInt(freeSpace) || 0,
-            });
-          }
-        }
-      }
-      return drives;
-    } else {
-      // macOS / Linux: get real disk usage via df
-      try {
-        const dfOutput = execSync('df -k /', { encoding: 'utf8' });
-        const lines = dfOutput.trim().split('\n');
-        if (lines.length >= 2) {
-          const parts = lines[1].trim().split(/\s+/);
-          // df -k columns: Filesystem, 1K-blocks, Used, Available, Use%, Mounted on
-          const totalBytes = (parseInt(parts[1]) || 0) * 1024;
-          const availableBytes = (parseInt(parts[3]) || 0) * 1024;
-          const driveName = process.platform === 'darwin' ? 'Macintosh HD' : 'Root';
-          return [{ letter: '/', name: driveName, path: '/', totalBytes, freeBytes: availableBytes }];
-        }
-      } catch (dfErr) {
-        console.error('df error:', dfErr);
-      }
-      return [{ letter: '/', name: 'Root', path: '/', totalBytes: 0, freeBytes: 0 }];
-    }
-  } catch (err) {
-    console.error('get-drives error:', err);
-    return [];
-  }
-});
+    dialog.showErrorBox(
+      'NexaFiles could not start',
+      `${err.message}
 
-// ── IPC: Get special user folders ──
-ipcMain.handle('get-special-folders', () => {
-  const home = os.homedir();
-  return {
-    home,
-    desktop: path.join(home, 'Desktop'),
-    documents: path.join(home, 'Documents'),
-    downloads: path.join(home, 'Downloads'),
-    music: path.join(home, 'Music'),
-    pictures: path.join(home, 'Pictures'),
-    videos: path.join(home, 'Videos'),
-    recyclebin: process.platform === 'win32' ? 'shell:RecycleBinFolder' : null,
-  };
-});
+` +
+      `The file index lives in:
+${app.getPath('userData')}
 
-// ── IPC: Select directory ──
-ipcMain.handle('select-directory', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory']
-  });
-  if (result.canceled) return null;
-  return result.filePaths[0];
-});
-
-// ── IPC: Read directory with full metadata ──
-ipcMain.handle('read-directory', async (event, dirPath) => {
-  try {
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
-    const files = await Promise.all(
-      entries
-        .filter(entry => !entry.name.startsWith('.')) // hide dotfiles
-        .map(async (entry) => {
-          const fullPath = path.join(dirPath, entry.name);
-          try {
-            const stats = await fs.stat(fullPath);
-            return {
-              name: entry.name,
-              path: fullPath,
-              isDirectory: entry.isDirectory(),
-              size: stats.size,
-              modified: stats.mtime.toISOString(),
-              created: stats.birthtime.toISOString(),
-              accessed: stats.atime.toISOString(),
-              extension: path.extname(entry.name).toLowerCase()
-            };
-          } catch (err) {
-            return null;
-          }
-        })
+` +
+      `If this persists, closing NexaFiles and renaming nexafiles_index.db in ` +
+      `that folder will let the application rebuild it. Nothing on your disk ` +
+      `outside that folder is affected.`
     );
-    return files.filter(f => f !== null);
-  } catch (error) {
-    console.error('Error reading directory:', error);
-    throw error;
-  }
-});
+  } catch { /* dialog unavailable; the console message is all we have */ }
+  app.exit(1);
+}
 
-// ── IPC: Get file stats ──
-ipcMain.handle('get-file-stats', async (event, filePath) => {
-  try {
-    const stats = await fs.stat(filePath);
-    return {
-      size: stats.size,
-      modified: stats.mtime.toISOString(),
-      created: stats.birthtime.toISOString(),
-      accessed: stats.atime.toISOString(),
-      isDirectory: stats.isDirectory()
-    };
-  } catch (error) {
-    throw error;
-  }
-});
-
-// ── IPC: Read file content (text) ──
-ipcMain.handle('read-file-content', async (event, filePath) => {
-  try {
-    const content = await fs.readFile(filePath, 'utf8');
-    return content;
-  } catch (error) {
-    throw error;
-  }
-});
-
-// ── IPC: Read first N bytes of a file (for PII scanning) ──
-ipcMain.handle('read-file-head', async (event, filePath, maxBytes = 8192) => {
-  try {
-    const fd = await fs.open(filePath, 'r');
-    const buffer = Buffer.alloc(maxBytes);
-    const { bytesRead } = await fd.read(buffer, 0, maxBytes, 0);
-    await fd.close();
-    return buffer.slice(0, bytesRead).toString('utf8', 0, bytesRead);
-  } catch (error) {
-    // Binary or unreadable file
-    return null;
-  }
-});
-
-// ── IPC: Compute file hash (MD5 for duplicate detection) ──
-ipcMain.handle('hash-file', async (event, filePath) => {
-  try {
-    const content = await fs.readFile(filePath);
-    return crypto.createHash('md5').update(content).digest('hex');
-  } catch (error) {
-    return null;
-  }
-});
-
-// ── IPC: Delete file (move to trash) ──
-ipcMain.handle('delete-file', async (event, filePath) => {
-  try {
-    await shell.trashItem(filePath);
-    return { success: true };
-  } catch (error) {
-    console.error('Delete failed:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// ── IPC: Rename file/folder ──
-ipcMain.handle('rename-file', async (event, oldPath, newName) => {
-  try {
-    const dir = path.dirname(oldPath);
-    const newPath = path.join(dir, newName);
-    await fs.rename(oldPath, newPath);
-    return { success: true, newPath };
-  } catch (error) {
-    console.error('Rename failed:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// ── IPC: Create folder ──
-ipcMain.handle('create-folder', async (event, parentDir, folderName) => {
-  try {
-    const folderPath = path.join(parentDir, folderName);
-    await fs.mkdir(folderPath, { recursive: true });
-    return { success: true, path: folderPath };
-  } catch (error) {
-    console.error('Create folder failed:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// ── IPC: Move file ──
-ipcMain.handle('move-file', async (event, sourcePath, destDir) => {
-  try {
-    const fileName = path.basename(sourcePath);
-    const destPath = path.join(destDir, fileName);
-    await fs.rename(sourcePath, destPath);
-    return { success: true, newPath: destPath };
-  } catch (error) {
-    console.error('Move failed:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// ── IPC: Open file with system default app ──
-ipcMain.handle('open-file-native', async (event, filePath) => {
-  try {
-    await shell.openPath(filePath);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// ── IPC: Get directory size (recursive) ──
-ipcMain.handle('get-directory-stats', async (event, dirPath) => {
-  try {
-    let totalSize = 0;
-    let fileCount = 0;
-    let folderCount = 0;
-
-    async function walk(dir) {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue;
-        const fullPath = path.join(dir, entry.name);
-        try {
-          if (entry.isDirectory()) {
-            folderCount++;
-            await walk(fullPath);
-          } else {
-            const stats = await fs.stat(fullPath);
-            totalSize += stats.size;
-            fileCount++;
-          }
-        } catch (e) { /* skip inaccessible */ }
-      }
-    }
-    await walk(dirPath);
-    return { totalSize, fileCount, folderCount };
-  } catch (error) {
-    throw error;
-  }
-});
-
-// ── IPC: Local DB Index ──
-ipcMain.handle('db-get-all-files', async () => {
-  try {
-    const rawFiles = await db.all('SELECT * FROM files');
-    return rawFiles.map(f => ({
-      ...f,
-      isDirectory: !!f.isDirectory,
-      isDuplicate: !!f.isDuplicate,
-      starred: !!f.starred,
-      tags: f.tags ? JSON.parse(f.tags) : []
-    }));
-  } catch (error) {
-    console.error('DB get error:', error);
-    return [];
-  }
-});
-
-ipcMain.handle('db-insert-file', async (event, fileData) => {
-  const { path: fpath, name, isDirectory, size, modified, created, accessed, extension, tags, type, sensitivity, isDuplicate, starred } = fileData;
-  try {
-    await db.run(`INSERT OR REPLACE INTO files (path, name, isDirectory, size, modified, created, accessed, extension, tags, type, sensitivity, isDuplicate, starred)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [fpath, name, isDirectory ? 1 : 0, size, modified, created, accessed, extension, JSON.stringify(tags || []), type, sensitivity, isDuplicate ? 1 : 0, starred ? 1 : 0]
-    );
-    return { success: true };
-  } catch (error) {
-    console.error('DB insert error:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('db-delete-file', async (event, filePath) => {
-  await db.run('DELETE FROM files WHERE path = ?', [filePath]);
-  return { success: true };
-});
-
-ipcMain.handle('db-clear-index', async () => {
-  await db.run('DELETE FROM files');
-  return { success: true };
-});
-
-// ── AI IPC Handlers ──
-ipcMain.handle('ai-health', async () => {
-  try {
-    const resp = await fetch(`${AI_SERVER_URL}/health`, { signal: AbortSignal.timeout(3000) });
-    return await resp.json();
-  } catch {
-    return { status: 'offline', sklearn: false, gemini: false };
-  }
-});
-
-ipcMain.handle('ai-classify', async (event, { filename, extension, content_snippet }) => {
-  const result = await aiPost('/classify', { filename, extension, content_snippet });
-  return result; // { category, confidence, probabilities } or null on error
-});
-
-ipcMain.handle('ai-summarize', async (event, { filename, content_snippet }) => {
-  const result = await aiPost('/summarize', { filename, content_snippet });
-  return result ? result.summary : null;
-});
-
-ipcMain.handle('ai-chat', async (event, { message, context }) => {
-  const result = await aiPost('/chat', { message, context });
-  return result || null;  // return full object: { reply, action, gemini_available }
-});
-
-// ── App lifecycle ──
 app.whenReady().then(async () => {
-  await initDB();
-  startAIServer();
+  // Losing the single-instance lock means another copy owns the index; this
+  // process is on its way out and must not touch anything on the way.
+  if (!hasInstanceLock) return;
+
+  // The user's home directory is the one root approved by launching the app.
+  // Everything else must be chosen explicitly through the directory picker.
+  roots.approveDefaultRoots();
+
+  state = new AppState({
+    userDataDir: app.getPath('userData'),
+    trashItem: (p) => shell.trashItem(p),
+  });
+  await state.init();
+
+  // Applied before the window exists, so the very first frame is the right
+  // colour rather than the right colour a moment later.
+  nativeTheme.themeSource = state.settings.values.theme;
+
+  if (state.index.migratedFromV1) {
+    console.log(
+      `[nexafiles] upgraded an older file index. The previous one was kept as ` +
+      `"${state.index.migratedFromV1}". Run a scan to rebuild the index.`
+    );
+  }
+
   createWindow();
+  register(state, mainWindow);
+
+  // Begin recording this boot session's CPU and memory. The graph it feeds
+  // covers this session only and restarts from zero after a reboot.
+  state.startSession(app);
+
+  // The assistant is optional. Without a key everything else still works.
+  state.agent = new Agent({
+    gemini: state.gemini,
+    tools: agentTools.build(state, { app, nativeImage }),
+  });
+
+  const keyStatus = state.gemini.status();
+  console.log(
+    `[nexafiles] ready. assistant: ${keyStatus.configured
+      ? `${keyStatus.keyCount} key(s) configured`
+      : 'no API key configured (local features unaffected)'}`
+  );
+}).catch(reportFatal);
+
+// A rejection anywhere in startup must not leave a windowless process running.
+process.on('unhandledRejection', (err) => {
+  if (!mainWindow) reportFatal(err instanceof Error ? err : new Error(String(err)));
+  else console.error('[nexafiles] unhandled rejection:', err);
 });
 
 app.on('window-all-closed', () => {
-  // Kill the AI server process
-  if (aiServerProcess) {
-    aiServerProcess.kill();
-    aiServerProcess = null;
-  }
   if (process.platform !== 'darwin') app.quit();
-});
-
-app.on('before-quit', () => {
-  if (aiServerProcess) {
-    aiServerProcess.kill();
-    aiServerProcess = null;
-  }
 });
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
+
+app.on('before-quit', () => {
+  state?.close();
 });

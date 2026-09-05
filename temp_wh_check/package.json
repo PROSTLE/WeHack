@@ -1,41 +1,33 @@
 {
   "name": "nexafiles",
-  "version": "2.0.0",
-  "description": "A file manager that shows you what is actually on your disk, and proves why anything it offers to remove is safe to remove.",
+  "version": "1.0.0",
+  "description": "NexaFiles – AI-powered File Manager",
   "main": "main.js",
   "author": "NexaFiles",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node test/run-all.js",
     "build:win": "electron-builder --win --x64",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
     "build:all": "electron-builder -mwl"
   },
   "devDependencies": {
-    "electron": "^37.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
   },
-  "dependencies": {},
   "build": {
     "appId": "com.nexafiles.app",
     "productName": "NexaFiles",
-    "copyright": "Copyright © 2026 NexaFiles",
+    "copyright": "Copyright © 2025 NexaFiles",
     "files": [
       "main.js",
       "preload.js",
       "src/**/*",
-      "assets/**/*",
-      "!src/_legacy_index.html",
-      "!**/*.map"
+      "assets/**/*"
     ],
-    "extraMetadata": {
-      "main": "main.js"
-    },
     "directories": {
-      "output": "dist",
-      "buildResources": "assets"
+      "output": "dist"
     },
     "win": {
       "target": [
@@ -46,7 +38,7 @@
           ]
         }
       ],
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.ico"
     },
     "mac": {
       "target": [
@@ -58,15 +50,8 @@
           ]
         }
       ],
-      "icon": "assets/icon.png",
-      "category": "public.app-category.utilities",
-      "hardenedRuntime": true,
-      "extendInfo": {
-        "NSDesktopFolderUsageDescription": "NexaFiles needs access to your Desktop to measure what is stored there.",
-        "NSDocumentsFolderUsageDescription": "NexaFiles needs access to your Documents to measure what is stored there.",
-        "NSDownloadsFolderUsageDescription": "NexaFiles needs access to your Downloads to measure what is stored there.",
-        "NSRemovableVolumesUsageDescription": "NexaFiles needs access to removable volumes to measure what is stored on them."
-      }
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.productivity"
     },
     "linux": {
       "target": [
@@ -98,5 +83,9 @@
         }
       ]
     }
+  },
+  "dependencies": {
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
   }
 }

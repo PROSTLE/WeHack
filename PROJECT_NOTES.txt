@@ -1,0 +1,396 @@
+NEXAFILES — PROJECT NOTES
+==========================
+A disk analysis tool + file manager for Windows, built on Electron, with an
+optional AI assistant. Zero runtime dependencies (uses Node's built-in
+node:sqlite and Electron's own nativeImage — nothing to npm install to run).
+
+
+1. FEATURES ADDED (what actually works today)
+================================================
+
+1.1 Disk scanning and visualization
+------------------------------------
+- Walks a chosen folder in a worker thread, records every file's size and
+  timestamps into a local SQLite index (src/main/db.js).
+- Treemap view: block area = measured bytes, hue = category (5 categories:
+  applications, documents, media, cache, system), saturation = recency
+  (a block untouched for a year renders washed out — visible staleness with
+  no text needed).
+- Category stat cards with real sparklines (actual monthly history from the
+  index, not decoration).
+- Storage-by-year comparison, recently-modified list, drive capacity bars.
+- Boot-session CPU/memory graph — records every 15s while the app is open,
+  survives sleep, resets on restart, always states how much of the session
+  it actually observed (never fills gaps with guesses).
+
+1.2 Duplicate detection — three tiers, all explainable, none "AI"
+-------------------------------------------------------------------
+- Tier 1 (exact): size bucket -> first/last 4KB hash -> full SHA-256. Only
+  byte-identical files. Files are pre-filtered before full hashing so a scan
+  doesn't hash every file on the disk.
+- Tier 2 (images): difference hash (dHash) over 9x8 greyscale pixels,
+  Hamming distance <= 6/64 bits. Finds resized/re-exported duplicates.
+- Tier 3 (documents): text is actually extracted (real PDF content-stream
+  parsing, real OOXML zip+XML parsing for docx/pptx/xlsx, RTF de-escaping —
+  see src/main/classify/extract.js) then SimHash over 3-word shingles,
+  Hamming distance <= 12/64 bits.
+- Tier 4 (video, mentioned in duplicates view): frame-hash per second,
+  detects re-encodes AND sub-clips cut from a longer original, reporting
+  the offset where the clip starts.
+- Every result states its method in plain English and explicitly says
+  "not machine learning" — this is a deliberate trust move.
+
+1.3 Application leftover detection
+------------------------------------
+- Finds AppData/LocalAppData/ProgramData folders belonging to apparently
+  uninstalled apps.
+- Corroborated by FOUR signals before being reported: no matching installed
+  app, no matching folder under Program Files, no matching running process,
+  no writes in 90 days. This is the most error-prone feature so it has the
+  most guardrails.
+- Splits results into "regenerates if removed" (safe, pre-selected) vs
+  "possibly your data" (never pre-selected, forces the user to look).
+
+1.4 The safety pipeline (why this app can be trusted to delete things)
+--------------------------------------------------------------------------
+- Nothing is ever deleted directly. Everything goes through: Plan -> user
+  reviews itemized list with evidence -> user approves -> Executor runs.
+- Files go to the OS Recycle Bin (shell.trashItem), never unlink().
+- Application-data removals go to an internal Quarantine (30-day retention,
+  full manifest of original location) so they can be restored byte-for-byte.
+- Every plan entry carries: reason, evidence (raw data that triggered the
+  match), confidence level (high/medium/low), and a checkbox — nothing is
+  removed that the user didn't see and tick.
+- src/main/security/roots.js is the single choke point: every filesystem
+  handler calls assertInsideRoot() before touching a path. A compromised
+  renderer literally cannot reach outside approved folders — this is
+  enforced in the main process, not the UI.
+- Hard-coded deny-list (Windows, WindowsApps, $Recycle.Bin, System Volume
+  Information, Recovery) that CANNOT be approved even by the user — this
+  exists specifically to survive a bug in the app itself.
+
+1.5 Full Windows Explorer-equivalent file manager (Files view)
+-------------------------------------------------------------------
+- Built from scratch to behave exactly like File Explorer: folders-first
+  sort, 4 columns (Name/Date/Type/Size), double-click, F2 rename-in-place,
+  Delete->Recycle Bin, Backspace=up, Ctrl+A/C/X/V, shift/ctrl-click ranges,
+  drag-and-drop between folders AND onto sidebar folders/breadcrumbs,
+  4 layouts (Details/List/Tiles/Large icons), sortable columns, a filter box.
+- REAL Windows icons and thumbnails — read from the OS shell
+  (app.getFileIcon, nativeImage.createThumbnailFromPath), not guessed from
+  extension. This is why a .pptx looks like PowerPoint's actual icon.
+- Hidden/system files detected via actual Windows attributes (dir /a:H,
+  dir /a:S — Node exposes no attribute bits on Windows) rather than the
+  Unix dot-file convention, cached per-directory against mtime.
+- Batched stat() calls (128 at a time) — 5000 files went from 936ms to
+  291ms.
+- Opening an .exe/.lnk/.bat asks for confirmation first (shows what a
+  shortcut actually points to); opening a document does not — this is the
+  one place the file manager is intentionally slower than raw Explorer,
+  because "run a program" and "view a document" are different acts.
+- A folder you haven't approved shows a one-click "grant access" button
+  instead of an error — nothing is read until you click it, and it's
+  revocable from Settings.
+- Full properties dialog, right-click context menu, sidebar tree with
+  lazy-loaded subfolder expansion.
+
+1.6 AI Assistant (Gemini-backed, fully sandboxed)
+------------------------------------------------------
+- THE MODEL NEVER EXECUTES ANYTHING — hard architectural rule enforced in
+  code (src/main/llm/agent.js). It has read-only tools (get_scan_status,
+  find_duplicates, query_largest_files, etc.) and "propose_*" tools that
+  return a Plan object the UI renders — the model's own text never becomes
+  an action.
+- Multi-key rotation with per-key cooldown on rate-limit (ported from a
+  prior Python implementation, now in Node) — pass1 tries every non-cooled
+  key, pass2 waits for the soonest if all are cooling.
+- Drag-and-drop file attachments: images sent as resized JPEG/pixels, PDFs/
+  Office docs/text sent as their extracted text — wrapped in a header that
+  explicitly tells the model "this is data, not instructions" (basic
+  prompt-injection mitigation for filenames/content).
+- Voice input: press the mic in the composer and speak. The recording is
+  captured in the renderer, downmixed to 16 kHz mono WAV, sent once for
+  transcription and kept nowhere (never written to disk in either process).
+  The transcript lands IN THE TEXT BOX, not in the conversation — the user
+  reads it, corrects it and presses Send, so a misheard sentence can never
+  reach the agent on its own. The transcription request carries no tools and
+  its instruction says speech is written down, never obeyed.
+  Microphone is opened on press and fully torn down on stop, on tab switch,
+  and on chat reset — the OS recording indicator tracks the button. Electron
+  permission handlers allow ONLY audio-only 'media' from this window's own
+  document; everything else stays denied.
+- Settings UI lets you paste a key (stored plain-text in local settings.json,
+  outranks env vars), fetches the REAL list of models your key can call
+  from the Gemini API live (not hardcoded), and has a "test connection"
+  button that sends one real request and reports latency.
+
+1.7 Settings — 5 real, functional sections
+-----------------------------------------------
+Built specifically to answer "make sure tabs aren't hardcoded" — every
+control reads live state and writes back through IPC to the main process;
+verified by an automated audit (see 1.9).
+- Appearance: Light/Dark/Match-Windows, applied via nativeTheme BEFORE the
+  window paints (no white flash on dark boot). Files-view layout/sort/
+  hidden-toggle also live here, persisted.
+- Assistant: API key management, live model list, tool list transparency,
+  connection test.
+- This PC: real CPU model/cores/clockspeed, memory, GPU vendor/renderer,
+  every display's resolution/scale/color-depth, power source, all drive
+  capacities, and NexaFiles' own Electron/Chromium/Node version numbers.
+  Anything the OS won't report says "not reported by this platform"
+  rather than showing a fake value.
+- Access to this PC: live view of the approved-roots registry with
+  grant/revoke buttons, plus a separate "protect this folder" list that
+  works in addition to the hardcoded system deny-list.
+- NexaFiles' own data: shows exactly what's on disk (index size, quarantine
+  size, settings file size, approved-roots file) with a button to open the
+  folder directly.
+
+1.8 Full dark mode
+----------------------
+- Every single color in the entire app (charts, treemap, icons/illustrations,
+  file-manager chrome — ~55+ previously-hardcoded hex values) now resolves
+  to a CSS custom property. Confirmed zero literal hex colors remain outside
+  the :root token block.
+- Dark isn't an inverted light theme — pigments are independently tuned so
+  they still read as saturated color against a dark ground, not washed out.
+- The treemap's recency fade INVERTS correctly with theme: stale files fade
+  toward white on light ground, toward black on dark ground (fading toward
+  white on a dark background would make old, ignorable files the BRIGHTEST
+  thing on screen — this was caught and fixed specifically).
+- Three states supported: light / dark / "match Windows" (live-updates via
+  Electron's nativeTheme 'updated' event while the app is running).
+
+1.9 Engineering rigor / test infrastructure (unusual for a project this size)
+-----------------------------------------------------------------------------
+- 20 automated test suites, one of them is a genuine novelty: an
+  "every control in the interface" audit that opens every view via the
+  real running app, and for every button/input/select on screen, asks
+  Chrome DevTools Protocol (not the app's own code) whether it has an
+  actual event listener bound. 371 controls checked. This caught 2 real
+  bugs (an Enter-key handler missing on the API key field, a filter box
+  that silently broke column sorting after re-render).
+- Bugs found and fixed via this process (documented, not hidden):
+  * dot-files (.gitignore etc.) were being wrongly hidden on Windows
+    because "dir /a:S found nothing" was misread as "attributes unreadable"
+    rather than as a valid empty answer — a genuinely subtle Windows-
+    specific correctness bug.
+  * settings.json could silently reset an entire section to factory
+    defaults if one field in a patch was invalid (fixed: bad fields fall
+    back to the PREVIOUS stored value, not hardcoded defaults).
+  * chat draft text was wiped by the 15-second background UI refresh timer.
+  * navigation race condition: double-clicking two folders fast could land
+    you in the wrong one (fixed with a sequence-number guard).
+  * PowerShell drive enumeration cost ~700ms and was called on every
+    sidebar interaction — now cached 5s, invalidated on any file operation.
+  * single-instance lock added at the Electron level (app.
+    requestSingleInstanceLock) so two copies can never corrupt one SQLite
+    index by both writing to it — a launcher script alone can't guarantee
+    this, so it was moved into the app itself.
+- start.bat launcher handles a real environment gotcha: if
+  ELECTRON_RUN_AS_NODE is set (many terminals/IDEs set this), `npm start`
+  silently fails with a cryptic TypeError. The batch file clears it first.
+
+
+2. LOGIC BEHIND THE SCENES (architecture, briefly)
+=====================================================
+
+main.js (Electron main process)
+  -> src/main/security/roots.js         <- EVERY fs operation passes through
+                                            this gate. Single point of trust.
+  -> src/main/safety/{plan,execute,quarantine,fsops}.js
+                                         <- the ONLY code allowed to delete
+                                            or move anything on disk.
+  -> src/main/scanners/{walker.worker,composition,duplicates,leftovers}.js
+                                         <- disk walk runs in a worker thread
+                                            so the UI never blocks.
+  -> src/main/classify/{rules,extract}.js
+                                         <- rule-based file typing + real
+                                            document text extraction, zero
+                                            ML, zero training data.
+  -> src/main/llm/{gemini,agent,tools,attachments,voice}.js
+                                         <- the sandboxed assistant, plus
+                                            speech-to-text for the composer.
+  -> src/main/settings.js               <- validated preference store
+                                            (sanitise() refuses bad values
+                                            at the boundary, never trusts
+                                            the renderer).
+  -> src/main/db.js                     <- SQLite index, node:sqlite
+                                            (built into Node 22, zero deps).
+
+preload.js -> contextBridge exposes ONLY named, narrow methods
+              (nodeIntegration:false, contextIsolation:true, sandbox
+              disabled only because preload needs ipcRenderer). The renderer
+              cannot reach fs, child_process, or an arbitrary IPC channel —
+              only what's explicitly listed here.
+
+src/renderer/js/{app,explorer,settings,dashboard,treemap,charts,icons}.js
+  -> string-templated HTML rendering (no framework, no build step, no
+     virtual DOM) — re-renders whole sections, but mutates the DOM directly
+     for high-frequency things (selection state, icon lazy-load, renaming)
+     to avoid visible flicker on large folders.
+
+Core design principle running through everything: "the interface never
+states a number it didn't measure." No estimated sizes, no fake health
+scores, no invented percentages. If something wasn't measured, the UI says
+so explicitly rather than filling the gap.
+
+
+3. FEATURES NOT YET ADDED (gaps, honestly assessed)
+=======================================================
+
+- No macOS/Linux Files-view parity. The Explorer-style file manager is
+  Windows-only in its current depth (shell icons via app.getFileIcon do
+  work cross-platform in Electron, but attribute-based hidden-file
+  detection, protected-path list, and drive enumeration are all
+  Windows-specific code paths right now).
+- No search across the whole disk (only "filter this folder" — a live,
+  disk-wide search index does not exist yet).
+- No content-based image search (find similar photos by subject, not just
+  perceptual hash of near-duplicates).
+- No archive browsing (can't see inside a .zip/.rar without extracting).
+- No network drive / cloud-storage awareness (OneDrive placeholder files,
+  actual UNC paths) — behavior there is untested.
+- No file preview pane (no Quick Look equivalent — you have to open a file
+  to see its contents).
+- No scheduled / background scanning (every scan is manually triggered).
+- No multi-window support (single window, single instance, by design —
+  but no "open folder in new window" either).
+- No undo for file-manager operations (copy/move/rename) — only the
+  Quarantine/Recycle-Bin safety net for deletions. A bad rename or move is
+  not one-click reversible the way a delete is.
+- The assistant has no long-term memory across app restarts (conversation
+  resets each launch — this may be intentional given the privacy stance,
+  but it's a real limitation vs. competitors with persistent chat history).
+- No telemetry/crash reporting of any kind — good for privacy, but means
+  there's no way to know what's breaking for real users beyond manual bug
+  reports.
+- Video duplicate detection tier exists in the scanner but has less UI
+  polish/testing than tiers 1-3.
+- No installer/auto-update mechanism verified in this pass (electron-
+  builder config exists but auto-update flow wasn't part of this session's
+  work).
+
+
+4. HOW THIS DIFFERS FROM COMPETITORS
+========================================
+
+Compared to CCleaner / similar "PC cleaner" tools:
+  - Those tools show a single alarming number ("14 GB of junk!") and a big
+    red "Clean Now" button. NexaFiles refuses to invent that number — every
+    figure is something it actually measured, and reclaimable space is
+    reported as "0" honestly until a duplicate/leftover scan has actually
+    run.
+  - CCleaner-style tools have a well-documented history of registry
+    "cleaning" that breaks things and deleting things silently or with a
+    single confirm-all dialog. NexaFiles' plan/evidence/quarantine pipeline
+    means every single item is inspectable before removal, and application
+    data removals are reversible for 30 days.
+  - Those tools' "AI" or "smart" scan logic is a black box. NexaFiles states
+    its method in one sentence per result and explicitly disclaims ML
+    ("SHA-256", "difference hashing", "SimHash" — named, checkable
+    algorithms) — this is a trust/transparency differentiator, not a
+    marketing feature.
+
+Compared to WizTree / TreeSize / SpaceSniffer (treemap disk visualizers):
+  - Those are visualization-only; they don't propose or execute cleanup.
+    NexaFiles' treemap is the front door to the SAME safety pipeline as
+    everything else, so visualization and action are unified.
+  - None of them have a built-in AI assistant that can be asked questions
+    about the scan in natural language.
+
+Compared to Windows' own File Explorer:
+  - NexaFiles' Files view intentionally matches Explorer's interaction
+    model (this was an explicit goal) so there's no learning curve, but
+    adds a security layer Explorer doesn't have (approved-roots sandboxing
+    is meaningless for Explorer since it's a trusted OS component — for a
+    third-party Electron app, it matters a great deal).
+
+Compared to other Electron-based file managers (e.g. some open-source
+"file manager" side-projects):
+  - Zero runtime npm dependencies is unusual — most Electron file managers
+    pull in several packages for icon extraction, image processing, etc.
+    NexaFiles uses only what Electron and Node already ship
+    (nativeImage, node:sqlite).
+  - The single-instance lock + approved-roots + quarantine + plan-approval
+    stack together is a genuinely uncommon depth of safety engineering for
+    a side-project-scale file manager.
+
+Compared to consumer "AI file organizer" apps (a growing 2024-2026
+category):
+  - Most of these are thin wrappers that send your whole file list (or
+    file contents) to a cloud API to get an "organize my files" suggestion,
+    with little transparency about what left your machine. NexaFiles' AI
+    layer is opt-in, has a hard no-execute rule enforced in code (not just
+    a prompt instruction), and only ever sees what you explicitly attach or
+    ask about — never a bulk disk inventory unless you ask the model to
+    call a specific read tool.
+
+
+5. IDEAS TO MAKE THIS MORE NOVEL (not built yet — proposals)
+=================================================================
+
+A. "Explain this folder" one-click summary
+   Point the assistant at any folder in the Files view and get a plain-
+   English summary using the ALREADY-extracted document text (tier-3
+   duplicate detection already parses PDF/docx/pptx content) — e.g. "this
+   folder holds 40 invoices from Jan-March 2026 and 3 unrelated screenshots."
+   This reuses existing extraction code, so it's cheaper to build than it
+   sounds.
+
+B. Semantic duplicate/near-duplicate for documents (not just SimHash)
+   Tier 3 already extracts full document text. Feeding that text into a
+   local embedding model (a small on-device one, keeping the "nothing
+   leaves your machine" promise) could catch documents that say the same
+   thing in different words — "meaningfully-similar" rather than just
+   "textually-similar" — while keeping everything local and un-cloud-
+   dependent, which no mainstream competitor currently offers together.
+
+C. Storage "why did this grow" diffing between scans
+   The scan history already exists in SQLite (categoryByMonth,
+   previousScan comparisons power the delta badges already). Extend this
+   into an explicit "what changed between scan A and scan B" view — new
+   files, grown files, deleted files — as a first-class feature rather
+   than a side calculation feeding a badge.
+
+D. Plan templates / rules you can save
+   Let a user say "always propose removing node_modules folders older
+   than 90 days with no matching package.json parent change" as a saved,
+   named rule they can re-run — turns one-off cleanup into a maintainable,
+   inspectable habit rather than a one-time action. Crucially: still routes
+   through the SAME plan-approval-quarantine pipeline, so saved rules never
+   bypass the safety model.
+
+E. Cross-machine / cross-drive duplicate finding
+   Point NexaFiles at an external drive or NAS share as a second approved
+   root and find duplicates ACROSS the two locations — "this 4K video is
+   already backed up on your D: drive, safe to remove from C:." Nobody in
+   the free/prosumer tier does this well.
+
+F. "Confidence you can audit" as a literal exportable report
+   Since every plan entry already carries evidence + confidence + method,
+   add a one-click "export this plan as a text/PDF report" — useful for
+   IT admins who need to justify a cleanup to someone else, or just for a
+   user who wants a receipt of what was removed and why. Nearly free to
+   build since the data model already has everything needed.
+
+G. Live folder-size badges in the sidebar tree
+   The sidebar tree currently lazy-loads folder NAMES on expand. Adding a
+   background size computation (throttled, cancellable) that shows "(4.2
+   GB)" next to each expanded folder — without a full scan — would close
+   the gap with WizTree's instant-size-everywhere feel while keeping
+   NexaFiles' honesty model (show "measuring..." rather than a stale
+   guess).
+
+H. A genuinely different assistant trust model: "show your work" mode
+   Already the assistant cites tool calls in the transcript ("Used:
+   get_disk_composition"). Making this ALWAYS visible and expandable per-
+   message (raw tool input/output, not just the name) would be a real,
+   defensible differentiator against every other "AI copilot" bolted onto
+   a utility app right now — most hide the tool-call layer entirely.
+
+The common thread across all of these: every proposed feature reuses data
+or infrastructure that already exists (scan history, extracted document
+text, the plan/evidence model, the approved-roots system) rather than
+bolting on something unrelated. That's consistent with how the app has
+been built so far — measure once, reuse everywhere, never fabricate.
