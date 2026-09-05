@@ -102,14 +102,23 @@ contextBridge.exposeInMainWorld('nexa', {
 
   duplicates: {
     find: (tier, opts) => call('duplicates:find', tier, opts || {}),
+    // Stops a comparison already running. What it had found by then still comes
+    // back from `find`, marked as partial — see the handler for why.
+    cancel: () => call('duplicates:cancel'),
   },
 
   leftovers: {
     find: () => call('leftovers:find'),
+    cancel: () => call('leftovers:cancel'),
   },
 
+  // Startup entries, and switching them off. `setEnabled` names an item by the
+  // four fields that identify it rather than sending a registry path to write
+  // to: the main process resolves those against what it actually enumerated,
+  // so the renderer can only ever act on something that is really there.
   startup: {
     list: () => call('startup:list'),
+    setEnabled: (ref, enabled) => call('startup:setEnabled', ref, enabled),
   },
 
   // Converting a document. `run` is for files the user picked in the Files view;
@@ -142,6 +151,11 @@ contextBridge.exposeInMainWorld('nexa', {
     processCpu: () => call('system:processCpu'),
     uptime: () => call('system:uptime'),
     session: () => call('system:session'),
+    // Everything running, one row per program instead of one per process.
+    background: (opts) => call('system:background', opts || {}),
+    // Closes a program. Asks its windows to close first; only terminates if
+    // they do not go, and only when `force` is set.
+    endProgram: (name, pids, opts) => call('system:endProgram', name, pids, opts || {}),
   },
 
   overview: {

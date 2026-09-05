@@ -170,4 +170,49 @@ async function pathsInUse(paths) {
   return { checked: true, inUse };
 }
 
-module.exports = { listProcesses, sampleCpuByProcess, pathsInUse };
+/**
+ * Collapses the process list into one row per program.
+ *
+ * A browser is thirty processes and a chat client is six. Listing them
+ * individually is a true report that answers no question anybody has: what a
+ * person wants to know is what Chrome costs, not what its twenty-second
+ * renderer costs. Grouping is by executable name, which is how the operating
+ * system's own task manager groups them, and each group keeps its members so
+ * the individual processes are still there to look at.
+ *
+ * CPU is added in only where a measurement exists for that pid. A group with no
+ * sampled member reports null rather than zero, because "not measured" and
+ * "using no CPU" are different answers.
+ */
+function groupByProgram(processes, cpuSamples = []) {
+  const cpuByPid = new Map(cpuSamples.map((c) => [c.pid, c.cpuPercent]));
+  const groups = new Map();
+
+  for (const p of processes) {
+    const key = String(p.name || 'unknown').toLowerCase();
+    if (!groups.has(key)) {
+      groups.set(key, {
+        name: p.name,
+        execPath: p.execPath || null,
+        processCount: 0,
+        rssBytes: 0,
+        cpuPercent: null,
+        pids: [],
+        members: [],
+      });
+    }
+    const g = groups.get(key);
+    g.processCount++;
+    g.rssBytes += p.rssBytes || 0;
+    g.pids.push(p.pid);
+    g.members.push(p);
+    if (!g.execPath && p.execPath) g.execPath = p.execPath;
+    if (cpuByPid.has(p.pid)) {
+      g.cpuPercent = (g.cpuPercent || 0) + cpuByPid.get(p.pid);
+    }
+  }
+
+  return [...groups.values()].sort((a, b) => b.rssBytes - a.rssBytes);
+}
+
+module.exports = { listProcesses, sampleCpuByProcess, pathsInUse, groupByProgram };

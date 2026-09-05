@@ -13,6 +13,7 @@ const NODE_SUITES = [
   ['scan and index', 'scan.test.js'],
   ['duplicates (tiers 1 and 3)', 'duplicates.test.js'],
   ['leftover matching', 'leftovers.test.js'],
+  ['startup management and process protection', 'startup-control.test.js'],
   ['persisted settings', 'settings.test.js'],
   ['Windows hidden and system attributes', 'attributes.test.js'],
   ['document text extraction', 'extract.test.js'],
@@ -56,6 +57,10 @@ const ELECTRON_SUITES = [
   ['the overlay panel, end to end', path.join('tools', 'e2e-overlay.js')],
   ['the wake word\u2019s listener window', path.join('tools', 'wake-window.js')],
   ['every control in the interface', path.join('tools', 'e2e-ui-audit.js')],
+  // Startup switches, the running list, and opening a file out of a duplicate
+  // group — the three that only answer to being clicked.
+  ['startup, background load and duplicate groups',
+    path.join('tools', 'e2e-startup-dupes.js')],
 ];
 
 const results = [];

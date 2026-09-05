@@ -29,10 +29,26 @@ const state = {
   dupeScope: null,
   leftovers: null,
   startup: null,
+  // The Startup view answers two questions — what starts with Windows, and what
+  // is running right now — and which one is on screen is remembered here so
+  // that acting on a row and coming back does not throw the user to the top.
+  startupTab: 'startup',
+  startupFilter: 'all',
+  background: null,
+  backgroundFilter: 'all',
   system: null,
   quarantine: null,
   scanning: false,
   busy: null,
+  // What stops the job `busy` is describing, or null when it cannot be stopped.
+  // Held as a function rather than a flag because the Stop button has to reach
+  // a different channel for a duplicate search than for a leftover sweep, and
+  // the progress bar should not have to know which is running.
+  busyCancel: null,
+  // The stop has been asked for and the scanner has not returned yet. The
+  // button becomes "Stopping…" rather than staying pressable, so a second click
+  // cannot read as "it did not work".
+  cancelPending: false,
   chat: [],
   chatAttachments: [],   // files dropped on the assistant, not yet sent
   chatDraft: '',         // what is in the composer but not yet sent
@@ -338,6 +354,7 @@ async function toggleBranch(target) {
 async function startScan(root) {
   if (state.scanning) { toast('A scan is already running.'); return; }
   state.scanning = true;
+  state.cancelPending = false;
   state.view = 'overview';
   state.crumbs = [];
   state.selectedBlock = null;
@@ -351,6 +368,7 @@ async function startScan(root) {
 
   const scan = await guard(() => nexa.scan.start(root), 'Scan');
   state.scanning = false;
+  state.cancelPending = false;
 
   if (scan) {
     state.scan = scan;
@@ -449,20 +467,119 @@ function renderAll() {
   if (state.view === 'overview' && state.composition) drawTreemap();
 }
 
+/**
+ * The bar that says something is running.
+ *
+ * Everything long-running that this bar can describe is also something the user
+ * must be able to call off. A comparison across a whole disk takes minutes, and
+ * a progress line with no way out is the thing that makes people force-quit the
+ * application — so whichever job is running names its own stop, and the button
+ * is drawn from that rather than only for the folder walk.
+ */
 function progressBlock() {
   if (!state.scanning && !state.busy) return '';
+  const stoppable = state.scanning || state.busyCancel;
   return `
     <div class="progress">
       <div class="spinner"></div>
       <div class="progress-text">
-        <div class="progress-counts" id="progress-counts">${state.busy || 'Starting…'}</div>
+        <div class="progress-counts" id="progress-counts">${esc(state.busy || 'Starting…')}</div>
         <div class="progress-current" id="progress-current"></div>
       </div>
-      ${state.scanning ? '<button class="btn small" id="cancel-scan">Cancel</button>' : ''}
+      ${state.cancelPending
+        ? '<span class="progress-stopping">Stopping…</span>'
+        : stoppable
+          ? `<button class="btn small" id="${state.scanning ? 'cancel-scan' : 'cancel-busy'}">
+               ${icon('cancel', { size: 13 })} Stop
+             </button>`
+          : ''}
     </div>`;
 }
 
 // ── overview ───────────────────────────────────────────────────────────────
+//
+// The Overview used to be eight full-width panels of identical visual weight,
+// stacked in the order they happened to be written: the headline figure, the
+// category cards, the drive, the machine's uptime, the treemap, a year
+// breakdown, recent files, largest files. Nothing said which of those answered
+// which question, and a panel about the processor sat in the middle of four
+// panels about the disk. Reading it meant scrolling the whole thing every time.
+//
+// It is now four named sections, in the order the questions actually get asked:
+// what can I get back, where is the space, what is worth looking at, and how is
+// the machine. The panels are unchanged; what changed is that they are grouped
+// and labelled, so the page can be navigated instead of read.
+
+/** A labelled break between groups of panels. */
+function sectionHead(title, note) {
+  return `
+    <div class="section-head">
+      <h2>${esc(title)}</h2>
+      ${note ? `<span class="section-note">${esc(note)}</span>` : ''}
+      <span class="section-rule"></span>
+    </div>`;
+}
+
+/**
+ * The headline figure, in a card rather than floating on the background.
+ *
+ * The number kept its size but gained a container and a set of supporting
+ * facts beside it. On its own it was a very large number with nothing to scale
+ * it against — "12.1 GB" means one thing on a 200 GB scan and another on a
+ * 2 TB one, and the facts that settle that were previously three panels away.
+ */
+function heroCard(scan, reclaimable) {
+  const facts = [
+    ['Measured', formatBytes(scan.totalBytes)],
+    ['Files', formatNumber(scan.fileCount)],
+    ['Folders', formatNumber(scan.dirCount)],
+  ];
+  const factList = `
+    <dl class="hero-facts">
+      ${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}
+      <div class="wide">
+        <dt>Scanned</dt>
+        <dd class="mono" title="${esc(scan.root)}">${esc(shortenPath(scan.root, 30))}</dd>
+      </div>
+    </dl>`;
+
+  if (reclaimable.known) {
+    const { value, unit } = splitBytes(reclaimable.bytes);
+    return `
+      <section class="hero-card">
+        <div class="hero-main">
+          <span class="hero-eyebrow">${icon('shield', { size: 13 })} Reclaimable</span>
+          <h1 class="hero-value"><span>${value}</span><span class="hero-unit">${unit}</span></h1>
+          <p class="hero-caption">
+            Across <strong>${formatNumber(reclaimable.items)}</strong> item(s) that
+            ${esc(reclaimable.basis)}. Every one carries the evidence that identified it.
+          </p>
+          <button class="btn primary hero-drill" id="hero-drill">
+            ${icon('eye')} Review the itemised plan
+          </button>
+        </div>
+        ${factList}
+      </section>`;
+  }
+
+  const { value, unit } = splitBytes(scan.totalBytes);
+  return `
+    <section class="hero-card">
+      <div class="hero-main">
+        <span class="hero-eyebrow">${icon('disk', { size: 13 })} Measured on this disk</span>
+        <h1 class="hero-value"><span>${value}</span><span class="hero-unit">${unit}</span></h1>
+        <p class="hero-caption">
+          Nothing has been checked for reclaimable space yet. Run a duplicate or
+          leftover scan and the figure above becomes what you could actually recover.
+        </p>
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" data-goto="duplicates">${icon('copies')} Find duplicates</button>
+          <button class="btn" data-goto="leftovers">${icon('layers')} Find leftovers</button>
+        </div>
+      </div>
+      ${factList}
+    </section>`;
+}
 
 function viewOverview() {
   if (state.scanning) {
@@ -479,6 +596,7 @@ function viewOverview() {
            your approval.</p>
         <button class="btn primary" id="empty-choose">${icon('scan')} Choose a folder to scan</button>
       </div>
+      ${state.session ? sectionHead('This machine') : ''}
       ${dash.sessionPanel(state.session, state.sessionMetric, { formatBytes })}`;
   }
 
@@ -501,45 +619,18 @@ function viewOverview() {
       <ul>${scan.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
     </div>` : '';
 
-  return progressBlock() + `
-    <div class="hero">
-      ${reclaimable.known ? `
-        <h1 class="hero-value">
-          <span>${splitBytes(reclaimable.bytes).value}</span>
-          <span class="hero-unit">${splitBytes(reclaimable.bytes).unit} reclaimable</span>
-        </h1>
-        <p class="hero-caption">
-          Measured across <strong>${formatNumber(reclaimable.items)}</strong> item(s) that
-          ${esc(reclaimable.basis)}. Every one carries the evidence that identified it.
-        </p>
-        <button class="btn primary hero-drill" id="hero-drill">
-          ${icon('eye')} Review the itemised plan
-        </button>
-      ` : `
-        <h1 class="hero-value">
-          <span>${splitBytes(scan.totalBytes).value}</span>
-          <span class="hero-unit">${splitBytes(scan.totalBytes).unit} measured</span>
-        </h1>
-        <p class="hero-caption">
-          <strong>${formatNumber(scan.fileCount)}</strong> files in
-          <strong>${formatNumber(scan.dirCount)}</strong> folders.
-          Nothing has been checked for reclaimable space yet — run a duplicate
-          or leftover scan and the figure above becomes what you could recover.
-        </p>
-        <div class="row" style="margin-top:14px">
-          <button class="btn primary" data-goto="duplicates">${icon('copies')} Find duplicates</button>
-          <button class="btn" data-goto="leftovers">${icon('layers')} Find leftovers</button>
-        </div>
-      `}
-    </div>
+  return progressBlock() +
+    heroCard(scan, reclaimable) +
 
-    ${state.summary ? dash.statCards(state.summary, { formatBytes, splitBytes }) : ''}
-    ${state.summary ? dash.storagePanel(state.summary, { formatBytes }) : ''}
-    ${dash.sessionPanel(state.session, state.sessionMetric, { formatBytes })}
-
+    // ── where the space is ──────────────────────────────────────────────
+    // The categories, the map of them, and the drive they sit on: three views
+    // of one question, now adjacent instead of separated by the uptime graph.
+    sectionHead('Where the space is',
+      `measured ${new Date(scan.finishedAt).toLocaleDateString()}`) +
+    (state.summary ? dash.statCards(state.summary, { formatBytes, splitBytes }) : '') + `
     <div class="panel">
       <header>
-        <h2>Where the space is</h2>
+        <h2>Explore by folder</h2>
         <div class="actions">
           <button class="btn small" id="rescan">${icon('scan')} Scan again</button>
         </div>
@@ -565,10 +656,11 @@ function viewOverview() {
       </div>
       ${caveats}
     </div>
+    ${state.summary ? dash.storagePanel(state.summary, { formatBytes }) : ''}
 
-    ${state.summary ? dash.byYearPanel(state.summary, { formatBytes }) : ''}
-    ${state.summary ? dash.recentPanel(state.summary, { formatBytes }) : ''}
-
+    ` +
+    // ── worth a look ────────────────────────────────────────────────────
+    sectionHead('Worth a look', 'the files behind those figures') + `
     <div class="panel">
       <header>
         <h2>${state.fileList.under && state.fileList.under !== scan.root
@@ -578,7 +670,16 @@ function viewOverview() {
           ${formatBytes(state.fileList.total.bytes)}</span>
       </header>
       ${fileTable(state.fileList.files)}
-    </div>`;
+    </div>
+    ` +
+    (state.summary ? dash.recentPanel(state.summary, { formatBytes }) : '') +
+    (state.summary ? dash.byYearPanel(state.summary, { formatBytes }) : '') +
+
+    // ── this machine ────────────────────────────────────────────────────
+    // Nothing here is about the disk, which is exactly why it used to read as
+    // an interruption. Last, under its own heading, it reads as an aside.
+    (state.session ? sectionHead('This machine') : '') +
+    dash.sessionPanel(state.session, state.sessionMetric, { formatBytes });
 }
 
 function shortPath(p) {
@@ -600,7 +701,7 @@ function fileTable(files) {
         </thead>
         <tbody>
           ${files.slice(0, 300).map((f) => `
-            <tr data-file="${esc(f.path)}">
+            <tr data-file="${esc(f.path)}" title="${esc(f.path)}">
               <td>${icon(iconForType(f.type, false))}</td>
               <td class="name">${esc(f.name)}</td>
               <td class="path">${esc(f.path)}</td>
@@ -739,6 +840,8 @@ function viewDuplicates() {
           <p class="muted">None found ${where}. ${esc(blurb)}</p>
           <div class="panel-note">${esc(r.method)}</div></div>`;
       }
+      const shown = r.groups.slice(0, DUPE_GROUP_LIMIT);
+      const hidden = r.groups.length - shown.length;
       return `
         <div class="panel">
           <header>
@@ -751,26 +854,113 @@ function viewDuplicates() {
               </button>
             </div>
           </header>
+          ${r.cancelled ? `
+            <div class="panel-note caution">
+              ${icon('caution', { size: 13 })} This search was stopped before it
+              finished. What is listed is real; what is <em>not</em> listed proves
+              nothing, because the rest of the folder was never compared.
+            </div>` : ''}
           <div class="panel-note">${icon('info', { size: 13 })} ${esc(r.method)}</div>
-          <div class="list-scroll" style="margin-top:12px">
-            <table class="table">
-              <thead><tr><th>Files in this group</th><th class="num">Size each</th><th class="num">Difference</th></tr></thead>
+          <p class="muted" style="margin:10px 0 0;font-size:12px">
+            Double-click a row to open the file, or use
+            ${icon('external', { size: 11 })} to open and
+            ${icon('folderOpen', { size: 11 })} to show it in its folder. Check a
+            copy against the one marked <span class="chip">kept</span> before you
+            build a plan — nothing is removed until you approve it.
+          </p>
+          <div class="list-scroll" style="margin-top:10px">
+            <table class="table dupe-table">
+              <thead><tr>
+                <th>File</th>
+                <th class="num">Size</th>
+                <th class="num">Difference</th>
+                <th class="dupe-actions-col">Open</th>
+              </tr></thead>
               <tbody>
-                ${r.groups.slice(0, 60).map((g) => g.members.map((m, i) => `
-                  <tr>
-                    <td>
-                      <div class="name">${esc(m.path.split(/[\\/]/).pop())}
-                        ${i === 0 ? '<span class="chip">kept</span>' : ''}</div>
-                      <div class="path">${esc(m.path)}</div>
-                    </td>
-                    <td class="num bytes">${formatBytes(m.size)}</td>
-                    <td class="num muted">${id === 'exact' ? 'identical' : `${m.distance}/64 bits`}</td>
-                  </tr>`).join('')).join('')}
+                ${shown.map((g, gi) => dupeGroupRows(g, gi, id)).join('')}
               </tbody>
             </table>
           </div>
+          ${hidden > 0 ? `
+            <div class="panel-note">
+              ${icon('info', { size: 13 })} ${formatNumber(hidden)} further group(s)
+              were found and are not drawn here, to keep this list scrollable. They
+              are all included in the plan.
+            </div>` : ''}
         </div>`;
     }).join('')}`;
+}
+
+/** How many groups the table draws before it stops, for the sake of the DOM. */
+const DUPE_GROUP_LIMIT = 60;
+
+/**
+ * One duplicate group: a header row naming it, then its files.
+ *
+ * The header exists because the previous table ran every group together, so
+ * "the files in this group" was a claim the markup never actually made — three
+ * copies of one photo and two copies of another were twenty-five adjacent rows
+ * with nothing to say where one group stopped. Each file row carries its own
+ * open and reveal controls, because deciding which of five identical files to
+ * keep means looking at where they live and, quite often, opening them.
+ */
+function dupeGroupRows(g, gi, tier) {
+  const kept = g.members[0];
+  return `
+    <tr class="dupe-group-head">
+      <td colspan="4">
+        <span class="dupe-group-n">Group ${gi + 1}</span>
+        <span class="dupe-group-meta">
+          ${formatNumber(g.members.length)} copies of
+          <strong>${esc(kept.path.split(/[\\/]/).pop())}</strong>
+          — ${formatBytes(g.wastedBytes)} reclaimable if you keep one
+        </span>
+        ${g.subclip ? `
+          <span class="dupe-group-note">
+            The second file is the passage from
+            ${esc(g.subclip.startLabel)} to ${esc(g.subclip.endLabel)} of the first,
+            matched across ${formatNumber(g.subclip.matchedFrames)} of
+            ${formatNumber(g.subclip.comparedFrames)} sampled frames.
+          </span>` : ''}
+        ${g.whole?.reason ? `
+          <span class="dupe-group-note">${esc(g.whole.reason)}.</span>` : ''}
+      </td>
+    </tr>
+    ${g.members.map((m, i) => `
+      <tr class="dupe-file ${i === 0 ? 'is-kept' : ''}" data-dupe-file="${esc(m.path)}"
+          title="Double-click to open this file">
+        <td>
+          <div class="name">${esc(m.path.split(/[\\/]/).pop())}
+            ${i === 0 ? '<span class="chip">kept</span>' : ''}</div>
+          <div class="path" title="${esc(m.path)}">${esc(m.path)}</div>
+          ${m.durationSec || m.width ? `
+            <div class="dupe-detail">
+              ${m.durationSec ? `${formatClock(m.durationSec)} long` : ''}
+              ${m.durationSec && m.width ? ' · ' : ''}
+              ${m.width ? `${m.width}×${m.height}` : ''}
+            </div>` : ''}
+        </td>
+        <td class="num bytes">${formatBytes(m.size)}</td>
+        <td class="num muted">${tier === 'exact' ? 'identical' : `${m.distance}/64 bits`}</td>
+        <td class="dupe-actions-col">
+          <span class="dupe-row-actions">
+            <button class="icon-btn" data-open-dupe="${esc(m.path)}"
+                    title="Open this file" aria-label="Open this file">
+              ${icon('external', { size: 14 })}
+            </button>
+            <button class="icon-btn" data-reveal-dupe="${esc(m.path)}"
+                    title="Show in its folder" aria-label="Show in its folder">
+              ${icon('folderOpen', { size: 14 })}
+            </button>
+          </span>
+        </td>
+      </tr>`).join('')}`;
+}
+
+/** Seconds as m:ss, for a clip's length or its offset into a longer file. */
+function formatClock(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 // ── leftovers ──────────────────────────────────────────────────────────────
@@ -798,12 +988,16 @@ function viewLeftovers() {
   const userData = l.findings.filter((f) => f.category === 'user-data');
 
   if (!l.findings.length) {
-    return `
+    return progressBlock() + `
       <div class="empty">
         ${illustration('nothingFound')}
-        <h2>Nothing looks left behind</h2>
-        <p>Every application-data folder examined matches something that is still
-           installed, still running, or has been written to recently.</p>
+        <h2>${l.cancelled ? 'Stopped before anything was found' : 'Nothing looks left behind'}</h2>
+        <p>${l.cancelled
+          ? `The sweep was stopped part of the way through, so this is not a
+             finding — it is simply where it got to.`
+          : `Every application-data folder examined matches something that is still
+             installed, still running, or has been written to recently.`}</p>
+        <button class="btn primary" id="find-leftovers">${icon('scan')} Look again</button>
       </div>`;
   }
 
@@ -818,6 +1012,12 @@ function viewLeftovers() {
           <button class="btn small" id="find-leftovers">${icon('scan')} Scan again</button>
         </div>
       </header>
+      ${l.cancelled ? `
+        <div class="panel-note caution">
+          ${icon('caution', { size: 13 })} This sweep was stopped before it finished.
+          The folders below were examined and judged; the ones it never reached are
+          simply absent, and their absence means nothing.
+        </div>` : ''}
       <div class="panel-note caution">
         <strong>Read this before removing anything</strong>
         <ul>${l.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
@@ -861,55 +1061,327 @@ function leftoverSection(title, findings, blurb, isUserData) {
     </div>`;
 }
 
-// ── startup ────────────────────────────────────────────────────────────────
+// ── startup and background load ────────────────────────────────────────────
+//
+// Two questions, one view. "What starts when I log in, and can I stop it" is
+// answered by the first tab; "what is running right now, and can I close it" by
+// the second. They are the same view because they are the same complaint, and
+// because the answer to the first is usually visible in the second: an entry
+// you switch off is one you can watch disappear from the running list.
+//
+// Every row here states what it costs. A list of forty startup entries with no
+// figures against them tells you nothing about which one to switch off, which
+// is exactly the criticism that produced this rewrite.
+
+/** The program rows exactly as the running list last drew them. */
+let backgroundShown = [];
+
+/** Which of the two tabs is showing. */
+const STARTUP_TABS = [
+  ['startup', 'power', 'Starts with Windows'],
+  ['background', 'activity', 'Running now'],
+];
+
+const STARTUP_FILTERS = [
+  ['all', 'Everything'],
+  ['on', 'Switched on'],
+  ['off', 'Switched off'],
+  ['running', 'Running now'],
+  ['heavy', 'Heaviest first'],
+];
 
 function viewStartup() {
+  return `
+    <div class="seg-tabs">
+      ${STARTUP_TABS.map(([id, ic, label]) => `
+        <button class="seg-tab" data-startup-tab="${id}"
+                aria-selected="${state.startupTab === id}">
+          ${icon(ic, { size: 14 })} ${label}
+        </button>`).join('')}
+    </div>
+    ${state.startupTab === 'background' ? viewBackground() : viewStartupItems()}`;
+}
+
+function viewStartupItems() {
   const s = state.startup;
   if (!s) {
     return progressBlock() + `
       <div class="panel">
-        <header><h2>Startup and background load</h2></header>
+        <header><h2>What starts with Windows</h2></header>
         <p class="muted" style="max-width:80ch">
-          What starts automatically when you log in. NexaFiles reports these; it
-          does not change them.
+          Every program, task and service that starts on its own when you log in
+          — with what each one is costing in memory right now, so it is possible
+          to tell which of them is worth switching off.
+        </p>
+        <p class="muted" style="max-width:80ch">
+          NexaFiles switches items off the way Task Manager does: the entry stays
+          exactly where its installer put it, and Windows is told to skip it.
+          Nothing is deleted, so every switch here has an equal switch back.
         </p>
         <button class="btn primary" id="load-startup" style="margin-top:14px">
-          ${icon('power')} List startup items
+          ${icon('power')} List what starts with Windows
         </button>
       </div>`;
   }
 
-  const groups = {};
-  for (const it of s.items) (groups[it.source] ||= []).push(it);
+  const items = s.items.map((it, i) => ({ ...it, idx: i }));
+  const enabled = items.filter((i) => i.enabled);
+  const off = items.length - enabled.length;
+  const running = items.filter((i) => i.runningNow);
 
-  return `
+  const filtered = filterStartupItems(items);
+  const groups = {};
+  for (const it of filtered) (groups[it.source] ||= []).push(it);
+
+  return progressBlock() + `
     <div class="panel">
       <header>
-        <h2>Startup and background load</h2>
-        <span class="muted">${formatNumber(s.items.length)} item(s)</span>
+        <h2>What starts with Windows</h2>
+        <div class="actions">
+          <button class="btn small" id="load-startup">${icon('refresh', { size: 13 })} Re-read</button>
+        </div>
       </header>
+      <div class="plan-totals">
+        <div>
+          <div class="plan-total-value">${formatNumber(enabled.length)}</div>
+          <div class="plan-total-label">entries Windows currently starts,
+            of ${formatNumber(items.length)} found${off ? ` — ${formatNumber(off)} already off` : ''}</div>
+        </div>
+        <div>
+          <div class="plan-total-value">${formatNumber(running.length)}</div>
+          <div class="plan-total-label">of them running at this moment</div>
+        </div>
+        <div>
+          <div class="plan-total-value">${s.measuredImpact
+            ? formatBytes(s.impact.totalRssBytes, 1) : '—'}</div>
+          <div class="plan-total-label">${s.measuredImpact
+            ? `held by those, across ${formatNumber(s.impact.distinctProcesses)} process(es)`
+            : 'memory in use could not be measured'}</div>
+        </div>
+      </div>
+
+      <div class="panel-note">
+        ${icon('info', { size: 13 })}
+        Switching an entry off does not close it if it is already running — it
+        stops it starting <em>next</em> time. To reclaim the memory now, close it
+        under <button class="linkish" data-startup-tab="background">Running now</button>.
+        ${s.elevated ? '' : `
+          Machine-wide entries and services are shown but cannot be changed:
+          NexaFiles is not running as administrator.`}
+      </div>
+
       ${s.incomplete || s.notes.length ? `
         <div class="panel-note caution">
-          ${icon('caution', { size: 13 })} <strong>This list is incomplete</strong>
+          ${icon('caution', { size: 13 })} <strong>What this list does not cover</strong>
           <ul>${s.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
         </div>` : ''}
+
+      <div class="filter-bar">
+        ${STARTUP_FILTERS.map(([id, label]) => `
+          <button class="chip-btn" data-startup-filter="${id}"
+                  aria-pressed="${state.startupFilter === id}">${label}</button>`).join('')}
+        <span class="filter-count">${formatNumber(filtered.length)} shown</span>
+      </div>
     </div>
-    ${Object.entries(groups).map(([source, items]) => `
+
+    ${filtered.length ? Object.entries(groups).map(([source, list]) => `
       <div class="panel">
-        <header><h2>${esc(source)}</h2><span class="muted">${items.length}</span></header>
-        <div class="list-scroll">
-          <table class="table">
-            <thead><tr><th>Name</th><th>Runs</th></tr></thead>
-            <tbody>
-              ${items.map((i) => `
-                <tr>
-                  <td class="name">${esc(i.name)}</td>
-                  <td class="path">${esc(i.command || '—')}</td>
-                </tr>`).join('')}
-            </tbody>
-          </table>
+        <header>
+          <h2>${esc(source)}</h2>
+          <span class="muted">${formatNumber(list.length)} entr${list.length === 1 ? 'y' : 'ies'}${
+            list.some((i) => i.rssBytes)
+              ? ` · ${formatBytes(list.reduce((n, i) => n + (i.sharesProcess ? 0 : i.rssBytes), 0))} in use now`
+              : ''}</span>
+        </header>
+        <div class="startup-list">
+          ${list.map(startupRow).join('')}
         </div>
-      </div>`).join('')}`;
+      </div>`).join('') : `
+      <div class="panel">
+        <p class="muted">Nothing matches that filter.</p>
+      </div>`}`;
+}
+
+function filterStartupItems(items) {
+  switch (state.startupFilter) {
+    case 'on':      return items.filter((i) => i.enabled);
+    case 'off':     return items.filter((i) => !i.enabled);
+    case 'running': return items.filter((i) => i.runningNow);
+    case 'heavy':   return [...items].sort((a, b) => (b.rssBytes || 0) - (a.rssBytes || 0));
+    default:        return items;
+  }
+}
+
+/**
+ * One startup entry.
+ *
+ * The switch is disabled rather than hidden when the entry cannot be changed,
+ * with the reason attached: "you cannot do this and here is why" is useful,
+ * and a row that silently lacks a control is not.
+ */
+function startupRow(it) {
+  const can = it.control?.toggleable;
+  const cost = it.runningNow
+    ? `${formatBytes(it.rssBytes)}${it.sharesProcess ? ' (shared)' : ''}` +
+      `${it.processCount > 1 ? ` · ${it.processCount} processes` : ''}`
+    : null;
+
+  return `
+    <div class="startup-row ${it.enabled ? '' : 'is-off'}">
+      <span class="startup-state ${it.enabled ? 'on' : 'off'}"
+            title="${it.enabled ? 'Windows starts this' : 'Windows skips this'}">
+        ${icon(it.enabled ? 'check' : 'x', { size: 12 })}
+      </span>
+      <div class="stack">
+        <span class="startup-name">
+          ${esc(it.name)}
+          ${it.runningNow ? '<span class="chip running">running</span>' : ''}
+          ${!it.enabled ? '<span class="chip">off</span>' : ''}
+        </span>
+        <span class="startup-line">
+          <span class="startup-cmd" title="${esc(it.command || '')}">${esc(it.command || 'no command recorded')}</span>
+          <button class="evidence-toggle" data-evidence="su-${it.idx}">Show the evidence</button>
+        </span>
+        <div class="evidence" id="su-${it.idx}" hidden>
+          <span class="evidence-label">How NexaFiles found this</span>
+          ${esc(it.evidence)}
+          ${it.control?.note ? `<br><br><strong>Switching it off:</strong> ${esc(it.control.note)}` : ''}
+        </div>
+      </div>
+      <span class="startup-cost">${cost ? esc(cost) : '<span class="muted">not running</span>'}</span>
+      <button class="btn small" data-startup-toggle="${it.idx}"
+              ${can ? '' : 'disabled'}
+              title="${esc(it.control?.note || '')}">
+        ${it.enabled ? `${icon('power', { size: 13 })} Turn off` : `${icon('check', { size: 13 })} Turn on`}
+      </button>
+    </div>`;
+}
+
+// ── running now ────────────────────────────────────────────────────────────
+
+function viewBackground() {
+  const b = state.background;
+  if (!b) {
+    return progressBlock() + `
+      <div class="panel">
+        <header><h2>What is running now</h2></header>
+        <p class="muted" style="max-width:80ch">
+          Everything running on this machine, one row per program rather than one
+          per process — a browser is thirty processes and knowing what the browser
+          costs is the useful figure, not what its twenty-second tab costs.
+        </p>
+        <p class="muted" style="max-width:80ch">
+          Closing something here frees its memory immediately, and is the only
+          action in NexaFiles with no undo: anything the program has not saved is
+          gone. So it is asked to close first, the way clicking its X asks it —
+          a program with unsaved work gets to put up its own prompt.
+        </p>
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" id="load-background">${icon('activity')} Show what is running</button>
+        </div>
+      </div>`;
+  }
+
+  const closable = b.groups.filter((g) => g.control.closable);
+  const shown = state.backgroundFilter === 'closable' ? closable : b.groups;
+  // The rows are addressed by position, so the list the buttons were drawn from
+  // is the list the click handler resolves against. Re-deriving it there would
+  // work until the filter changed between the two, and then it would close the
+  // wrong program.
+  backgroundShown = shown;
+
+  return progressBlock() + `
+    <div class="panel">
+      <header>
+        <h2>What is running now</h2>
+        <div class="actions">
+          <button class="btn small" id="load-background">${icon('refresh', { size: 13 })} Re-measure</button>
+          <button class="btn small" id="load-background-cpu">${icon('cpu', { size: 13 })} With CPU</button>
+        </div>
+      </header>
+      <div class="plan-totals">
+        <div>
+          <div class="plan-total-value">${formatNumber(b.groups.length)}</div>
+          <div class="plan-total-label">programs, across
+            ${formatNumber(b.processCount)} processes</div>
+        </div>
+        <div>
+          <div class="plan-total-value">${formatBytes(b.totalRssBytes, 1)}</div>
+          <div class="plan-total-label">working set across all of them</div>
+        </div>
+        <div>
+          <div class="plan-total-value">${formatNumber(closable.length)}</div>
+          <div class="plan-total-label">that NexaFiles will offer to close;
+            the rest are parts of Windows</div>
+        </div>
+      </div>
+      <div class="panel-note">
+        ${icon('info', { size: 13 })}
+        Measured ${new Date(b.measuredAt).toLocaleTimeString()}.
+        ${b.cpuMeasured
+          ? 'CPU is a genuine percentage, taken by diffing two samples one second apart.'
+          : 'CPU is not shown: a single reading of a cumulative counter is not a percentage. ' +
+            'Press "With CPU" to spend a second measuring it properly.'}
+        Working set is memory the process currently has resident — it is not the
+        amount that would be freed, because parts of it are shared with other
+        processes.
+      </div>
+      <div class="filter-bar">
+        <button class="chip-btn" data-bg-filter="all"
+                aria-pressed="${state.backgroundFilter !== 'closable'}">Everything</button>
+        <button class="chip-btn" data-bg-filter="closable"
+                aria-pressed="${state.backgroundFilter === 'closable'}">Only what I can close</button>
+        <span class="filter-count">${formatNumber(shown.length)} shown</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="list-scroll" style="max-height:560px">
+        <table class="table">
+          <thead><tr>
+            <th>Program</th>
+            ${b.cpuMeasured ? '<th class="num">CPU</th>' : ''}
+            <th class="num">Memory</th>
+            <th class="num">Processes</th>
+            <th></th>
+          </tr></thead>
+          <tbody>
+            ${shown.slice(0, 200).map((g, i) => `
+              <tr class="${g.control.closable ? '' : 'is-protected'}">
+                <td>
+                  <div class="name">${esc(g.name)}
+                    ${g.control.severity === 'heavy'
+                      ? '<span class="chip caution-chip">part of the desktop</span>' : ''}
+                    ${g.control.severity === 'critical'
+                      ? '<span class="chip">Windows</span>' : ''}
+                    ${g.control.severity === 'security'
+                      ? '<span class="chip caution-chip">security software</span>' : ''}</div>
+                  <div class="path">${esc(g.execPath || 'path not readable without elevation')}</div>
+                  ${g.control.closable ? '' : `
+                    <div class="dupe-detail">${esc(g.control.reason)}</div>`}
+                </td>
+                ${b.cpuMeasured
+                  ? `<td class="num bytes">${g.cpuPercent === null
+                      ? '<span class="muted">—</span>'
+                      : `${g.cpuPercent.toFixed(1)}%`}</td>`
+                  : ''}
+                <td class="num bytes">${formatBytes(g.rssBytes)}</td>
+                <td class="num muted">${formatNumber(g.processCount)}</td>
+                <td class="num">
+                  <button class="btn small" data-end-program="${i}"
+                          ${g.control.closable ? '' : 'disabled'}
+                          title="${esc(g.control.reason)}">
+                    ${g.control.closable ? 'Close' : 'Protected'}
+                  </button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${shown.length > 200 ? `
+        <div class="panel-note">${icon('info', { size: 13 })}
+          Showing the 200 largest of ${formatNumber(shown.length)}.</div>` : ''}
+    </div>`;
 }
 
 // ── system ─────────────────────────────────────────────────────────────────
@@ -981,6 +1453,41 @@ function viewSystem() {
 
 // ── quarantine ─────────────────────────────────────────────────────────────
 
+/**
+ * What quarantine is for, in the words of the problem it solves.
+ *
+ * The name is jargon and the empty state used to assume the reader already knew
+ * what it meant. It is not an antivirus quarantine and it is not a second
+ * recycle bin: it is the undo for the one class of deletion the recycle bin
+ * handles badly — a folder buried inside AppData that has to go back to the
+ * exact path it came from, under its exact name, or the application that owns
+ * it will not find it.
+ */
+function quarantineExplainer() {
+  return `
+    <div class="panel-note">
+      ${icon('info', { size: 13 })}
+      <strong>What quarantine is, and why it is not the recycle bin</strong>
+      <ul>
+        <li><strong>Files you would recognise never come here.</strong> A photo, a
+          document, a download — those go to the recycle bin, because that is the
+          undo you already know how to use.</li>
+        <li><strong>Application internals come here instead.</strong> Leftover
+          cache and support folders from under AppData restore to the exact path,
+          name and timestamp they had. Dragging a folder back out of the recycle
+          bin does not reliably do that, and an application that cannot find its
+          own folder where it left it behaves as though its data is gone.</li>
+        <li><strong>Every item keeps the reason it was removed.</strong> If
+          something stops working a week later, this list can tell you what was
+          taken and what the evidence for taking it was — so "restore it and see"
+          is an answer available to you rather than a guess.</li>
+        <li><strong>It empties itself after 30 days.</strong> Until then nothing
+          is actually deleted; the bytes are simply held somewhere the application
+          that owned them cannot see. After that the space is genuinely returned.</li>
+      </ul>
+    </div>`;
+}
+
 function viewQuarantine() {
   const q = state.quarantine;
   if (!q || !q.items.length) {
@@ -988,9 +1495,13 @@ function viewQuarantine() {
       <div class="empty">
         ${illustration('emptyQuarantine')}
         <h2>Quarantine is empty</h2>
-        <p>Anything NexaFiles removes from inside an application is held here for
-           30 days, with a record of where it came from, so you can put it back
-           exactly where it was.</p>
+        <p>Nothing has been removed from inside an application yet. When something
+           is, it is held here rather than deleted — so a removal that turns out to
+           have been a mistake is a mistake you can take back.</p>
+      </div>
+      <div class="panel">
+        <header><h2>What this is for</h2></header>
+        ${quarantineExplainer()}
       </div>`;
   }
 
@@ -1004,6 +1515,7 @@ function viewQuarantine() {
         Each of these can be restored to its original location. After its expiry
         date it is deleted permanently.
       </p>
+      ${quarantineExplainer()}
       <div style="margin-top:14px">
         ${q.items.map((it, i) => `
           <div class="plan-row">
@@ -1548,7 +2060,12 @@ function wireStage() {
   stage.querySelector('#rescan')?.addEventListener('click', () => {
     if (state.scan) startScan(state.scan.root);
   });
-  stage.querySelector('#cancel-scan')?.addEventListener('click', () => nexa.scan.cancel());
+  stage.querySelector('#cancel-scan')?.addEventListener('click', () => {
+    state.cancelPending = true;
+    renderAll();
+    nexa.scan.cancel().catch(() => {});
+  });
+  stage.querySelector('#cancel-busy')?.addEventListener('click', cancelBusy);
   stage.querySelector('#hero-drill')?.addEventListener('click', async () => {
     if (state.duplicates?.exact?.groups.length) await buildPlan('duplicates', 'exact');
     else if (state.leftovers) await buildPlan('leftovers');
@@ -1572,10 +2089,55 @@ function wireStage() {
   stage.querySelectorAll('[data-dupe-plan]').forEach((b) => {
     b.addEventListener('click', () => buildPlan('duplicates', b.dataset.dupePlan));
   });
+
+  // Opening a duplicate. Deciding which of five identical files to keep means
+  // looking at them, so the row itself opens the file and the two buttons split
+  // "open it" from "show me where it lives" — the second being the one that
+  // actually answers "which copy is this".
+  stage.querySelectorAll('[data-open-dupe]').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openDuplicate(b.dataset.openDupe);
+    });
+  });
+  stage.querySelectorAll('[data-reveal-dupe]').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      revealDuplicate(b.dataset.revealDupe);
+    });
+  });
+  stage.querySelectorAll('[data-dupe-file]').forEach((tr) => {
+    tr.addEventListener('dblclick', () => openDuplicate(tr.dataset.dupeFile));
+  });
+
   stage.querySelector('#find-leftovers')?.addEventListener('click', runLeftovers);
   stage.querySelector('#leftover-plan')?.addEventListener('click', () => buildPlan('leftovers'));
   stage.querySelector('#load-startup')?.addEventListener('click', loadStartup);
   stage.querySelector('#load-system')?.addEventListener('click', loadSystem);
+
+  stage.querySelectorAll('[data-startup-tab]').forEach((b) => {
+    b.addEventListener('click', () => {
+      state.startupTab = b.dataset.startupTab;
+      renderAll();
+      // Arriving at the running list for the first time should show it, not an
+      // invitation to press one more button.
+      if (state.startupTab === 'background' && !state.background) loadBackground();
+    });
+  });
+  stage.querySelectorAll('[data-startup-filter]').forEach((b) => {
+    b.addEventListener('click', () => { state.startupFilter = b.dataset.startupFilter; renderAll(); });
+  });
+  stage.querySelectorAll('[data-startup-toggle]').forEach((b) => {
+    b.addEventListener('click', () => toggleStartupItem(Number(b.dataset.startupToggle)));
+  });
+  stage.querySelector('#load-background')?.addEventListener('click', () => loadBackground());
+  stage.querySelector('#load-background-cpu')?.addEventListener('click', () => loadBackground(true));
+  stage.querySelectorAll('[data-bg-filter]').forEach((b) => {
+    b.addEventListener('click', () => { state.backgroundFilter = b.dataset.bgFilter; renderAll(); });
+  });
+  stage.querySelectorAll('[data-end-program]').forEach((b) => {
+    b.addEventListener('click', () => endProgram(Number(b.dataset.endProgram)));
+  });
 
   stage.querySelectorAll('[data-restore]').forEach((b) => {
     b.addEventListener('click', () => restoreItem(b.dataset.restore));
@@ -1677,22 +2239,42 @@ async function runDuplicates(tier) {
   state.busy = where
     ? `Comparing files in ${where}…`
     : `Comparing files (${tier})…`;
+  state.busyCancel = () => nexa.duplicates.cancel();
+  state.cancelPending = false;
   renderAll();
 
   const res = await guard(
     () => nexa.duplicates.find(tier, { under: scope }), 'Duplicate scan');
   state.busy = null;
+  state.busyCancel = null;
+  state.cancelPending = false;
 
   if (res) {
     state.duplicates = { ...(state.duplicates || {}), [tier]: res };
     // The toast names the folder for the same reason the panel does: a count
-    // with no scope attached reads as a statement about the whole disk.
+    // with no scope attached reads as a statement about the whole disk. A
+    // stopped search says so in the same breath, because "no duplicates found"
+    // after a cancellation would be a claim the search never earned.
     const place = res.scopeName ? ` in ${res.scopeName}` : '';
-    toast(res.groups.length
-      ? `${res.groups.length} group(s) found${place}, ${formatBytes(res.totalWasted)} reclaimable.`
-      : `No duplicates found${place}.`);
+    if (res.cancelled) {
+      toast(res.groups.length
+        ? `Stopped. ${res.groups.length} group(s) found${place} before it stopped.`
+        : `Stopped before anything was found${place}.`);
+    } else {
+      toast(res.groups.length
+        ? `${res.groups.length} group(s) found${place}, ${formatBytes(res.totalWasted)} reclaimable.`
+        : `No duplicates found${place}.`);
+    }
   }
   renderAll();
+}
+
+/** The Stop button under whichever long job is running. */
+async function cancelBusy() {
+  if (!state.busyCancel || state.cancelPending) return;
+  state.cancelPending = true;
+  renderAll();
+  await guard(state.busyCancel, 'Stopping');
 }
 
 /**
@@ -1724,12 +2306,26 @@ function clearDuplicateFolder() {
 
 async function runLeftovers() {
   state.busy = 'Comparing application data against installed applications…';
+  state.busyCancel = () => nexa.leftovers.cancel();
+  state.cancelPending = false;
   renderAll();
+
   const res = await guard(() => nexa.leftovers.find(), 'Leftover scan');
   state.busy = null;
+  state.busyCancel = null;
+  state.cancelPending = false;
+
   if (res) {
     state.leftovers = res;
-    toast(res.findings.length ? `${res.findings.length} folder(s) found.` : 'Nothing looks left behind.');
+    if (res.cancelled) {
+      toast(res.findings.length
+        ? `Stopped. ${res.findings.length} folder(s) found before it stopped.`
+        : 'Stopped before anything was found.');
+    } else {
+      toast(res.findings.length
+        ? `${res.findings.length} folder(s) found.`
+        : 'Nothing looks left behind.');
+    }
   }
   renderAll();
 }
@@ -1799,11 +2395,148 @@ async function refreshQuarantine() {
   state.quarantine = await guard(() => nexa.quarantine.list(), 'Reading quarantine');
 }
 
+// ── opening a duplicate ────────────────────────────────────────────────────
+
+/**
+ * Opens one of the files in a duplicate group.
+ *
+ * Goes through the Files view's own open, so a duplicate that turns out to be
+ * an executable gets the same "run this program?" question it would get in the
+ * Files view. A duplicate list is precisely where a stray copy of an installer
+ * ends up, and it would be a poor place to lose that check.
+ */
+async function openDuplicate(filePath) {
+  if (!filePath) return;
+  try {
+    const res = await nexa.explorer.open(filePath);
+    if (res && res.cancelled) toast('Left it alone.');
+  } catch (err) {
+    if (err.code === 'IS_DIRECTORY') {
+      state.view = 'files';
+      renderAll();
+      explorer.navigate(filePath, { push: true });
+      return;
+    }
+    // The commonest failure by far is that the copy has already been removed
+    // since the scan, which is worth saying plainly rather than passing on a
+    // shell error about a path.
+    toast(`Could not open it: ${err.message}`, 'error');
+  }
+}
+
+async function revealDuplicate(filePath) {
+  if (!filePath) return;
+  const ok = await guard(() => nexa.explorer.reveal(filePath), 'Showing the file');
+  if (ok) toast('Opened its folder.');
+}
+
+// ── startup and background load ────────────────────────────────────────────
+
 async function loadStartup() {
-  state.busy = 'Reading startup entries…';
+  state.busy = 'Reading startup entries and measuring what they are using…';
   renderAll();
   state.startup = await guard(() => nexa.startup.list(), 'Startup');
   state.busy = null;
+  renderAll();
+}
+
+/**
+ * Switches one startup entry on or off.
+ *
+ * The list is re-read afterwards rather than patched, because the answer to
+ * "did that work" is what the registry says now, not what this function
+ * intended. A write that silently failed would otherwise leave a row claiming
+ * a state the machine is not in.
+ */
+async function toggleStartupItem(index) {
+  const item = state.startup?.items?.[index];
+  if (!item) return;
+
+  const turningOff = item.enabled;
+  if (turningOff && item.kind === 'service') {
+    const ok = window.confirm(
+      `Stop the service "${item.name}" starting with Windows?\n\n` +
+      `It will be set to start on demand rather than automatically, so anything ` +
+      `that genuinely needs it can still start it. It is not disabled outright, ` +
+      `and this can be undone from this same list.`);
+    if (!ok) return;
+  }
+
+  state.busy = `${turningOff ? 'Switching off' : 'Switching on'} ${item.name}…`;
+  renderAll();
+
+  const res = await guard(
+    () => nexa.startup.setEnabled(
+      { kind: item.kind, source: item.source, location: item.location, name: item.name },
+      !turningOff),
+    'Changing a startup item');
+
+  state.busy = null;
+  if (res) {
+    toast(turningOff
+      ? `${item.name} will not start with Windows. It is still installed, and this ` +
+        `list can switch it back on.`
+      : `${item.name} will start with Windows again.`);
+    // Re-read, so what is on screen is what is on the machine.
+    state.startup = await guard(() => nexa.startup.list(), 'Startup');
+  }
+  renderAll();
+}
+
+async function loadBackground(withCpu = false) {
+  state.busy = withCpu
+    ? 'Measuring CPU across one second, and memory for every process…'
+    : 'Reading what is running…';
+  renderAll();
+  const res = await guard(() => nexa.system.background({ withCpu }), 'Running programs');
+  if (res) state.background = res;
+  state.busy = null;
+  renderAll();
+}
+
+/**
+ * Closes every process belonging to one program.
+ *
+ * The confirmation is deliberately specific — the name, the process count, the
+ * memory, and what closing costs — because this is the only thing NexaFiles
+ * does that cannot be undone, and a generic "are you sure?" would not give
+ * anybody enough to answer with.
+ */
+async function endProgram(index) {
+  const g = backgroundShown[index];
+  if (!g) return;
+  if (!g.control.closable) { toast(g.control.reason, 'error'); return; }
+
+  const ok = window.confirm(
+    `Close ${g.name}?\n\n` +
+    `${g.processCount} process(es), ${formatBytes(g.rssBytes)} of memory.\n\n` +
+    `${g.control.reason}\n\n` +
+    `This cannot be undone, and it does not stop ${g.name} starting again next ` +
+    `time you log in — use "Starts with Windows" for that.`);
+  if (!ok) return;
+
+  state.busy = `Closing ${g.name}…`;
+  renderAll();
+  const res = await guard(() => nexa.system.endProgram(g.name, g.pids), 'Closing a program');
+  state.busy = null;
+
+  if (res) {
+    if (res.closed && !res.failed) {
+      toast(`${g.name} closed — ${res.closed} process(es).` +
+        (res.forced ? ' Some had to be terminated.' : ''));
+    } else if (res.closed) {
+      toast(`${res.closed} of ${res.closed + res.failed} process(es) closed. ` +
+        `The rest are running with rights NexaFiles does not have.`, 'error');
+    } else {
+      toast(`${g.name} could not be closed. ` +
+        `${res.results[0]?.detail || ''}`, 'error');
+    }
+    // Re-measure rather than removing the row: what actually happened is a
+    // question for the operating system, and a program that respawns itself
+    // should be visibly still there.
+    await loadBackground(state.background?.cpuMeasured);
+    return;
+  }
   renderAll();
 }
 

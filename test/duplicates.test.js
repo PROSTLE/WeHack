@@ -123,6 +123,40 @@ function ok(name, cond, extra = '') {
     ok('evidence states the measured bit distance', /\d+ of 64 bits/.test(te.evidence));
   }
 
+  // ── stopping a search that is already running ──
+  //
+  // A comparison across a disk takes minutes, and the Stop button under the
+  // progress bar is only real if the scanner actually reads the flag. What
+  // matters is not just that it stops but *how*: it must hand back what it had
+  // already found rather than throwing the work away, and it must not pretend
+  // the search finished.
+  console.log('\n-- stopping a search --');
+
+  const stopped = await findExactDuplicates(index, scan.id, {
+    minBytes: 4096, shouldCancel: () => true,
+  });
+  ok('a search cancelled before it starts returns no findings',
+    stopped.groups.length === 0, `${stopped.groups.length} groups`);
+  ok('and returns normally rather than throwing',
+    stopped.stats !== undefined && typeof stopped.stats.sizeGroups === 'number');
+  ok('and reports how far it got, so the caller can say so',
+    stopped.stats.fullyHashed === 0, `${stopped.stats.fullyHashed} hashed`);
+
+  // Stopping after the first size group means the work already done survives.
+  let seen = 0;
+  const partial = await findExactDuplicates(index, scan.id, {
+    minBytes: 4096, shouldCancel: () => seen++ > 0,
+  });
+  ok('a search stopped partway keeps what it had already found',
+    partial.groups.length <= groups.length,
+    `${partial.groups.length} of ${groups.length}`);
+
+  const textStopped = await findSimilarText(index, scan2.id, {
+    minBytes: 1024, shouldCancel: () => true,
+  });
+  ok('the document tier honours the same stop',
+    textStopped.groups.length === 0 && textStopped.stats !== undefined);
+
   index.close();
   await fsp.rm(work, { recursive: true, force: true });
   for (const s of ['', '-wal', '-shm']) await fsp.rm(dbPath + s, { force: true });

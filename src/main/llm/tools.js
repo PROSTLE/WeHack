@@ -118,6 +118,17 @@ function build(state, { app, nativeImage, onStage = null }) {
       return {
         scanned: true,
         tier: key,
+        // A search the user stopped is a floor, not a total. Saying so here is
+        // the only thing preventing "you can reclaim 4 GB" being said about a
+        // search that covered a third of the disk.
+        complete: !found.partial,
+        ...(found.partial ? {
+          incompleteWarning:
+            'This search was stopped before it finished. The groups below are ' +
+            'genuine, but the reclaimable figure is the least that could be ' +
+            'reclaimed, not the amount. Do not present it as a total, and offer ' +
+            'to run the search again rather than answering from this.',
+        } : {}),
         method: key === 'exact'
           ? 'SHA-256 after a size and head/tail pre-filter. Matches are byte-identical.'
           : key === 'image'
@@ -137,10 +148,14 @@ function build(state, { app, nativeImage, onStage = null }) {
       if (!state.lastLeftovers) {
         state.lastLeftovers = await findLeftovers({ listProcesses });
       }
-      const { findings, notes, stats } = state.lastLeftovers;
+      const { findings, notes, stats, partial } = state.lastLeftovers;
       return {
         stats,
-        caveats: notes,
+        complete: !partial,
+        caveats: partial
+          ? [...notes, 'This sweep was stopped before it finished, so the total ' +
+             'below is the least that could be reclaimed rather than the amount.']
+          : notes,
         totalBytes: findings.reduce((n, f) => n + f.bytes, 0),
         findings: findings.slice(0, 40).map((f) => ({
           path: f.path, name: f.name, bytes: f.bytes, fileCount: f.fileCount,
@@ -151,16 +166,22 @@ function build(state, { app, nativeImage, onStage = null }) {
     },
 
     async list_startup_items() {
-      if (!state.lastStartup) state.lastStartup = await listStartupItems();
+      if (!state.lastStartup) state.lastStartup = await listStartupItems({ listProcesses });
       const s = state.lastStartup;
       return {
         platform: s.platform,
         incomplete: s.incomplete,
         caveats: s.notes,
         itemCount: s.items.length,
+        enabledCount: s.items.filter((i) => i.enabled).length,
+        runningNowCount: s.items.filter((i) => i.runningNow).length,
+        memoryInUseByStartupItems: s.impact?.totalRssBytes ?? null,
         items: s.items.slice(0, 60).map((i) => ({
           name: i.name, command: i.command, source: i.source, evidence: i.evidence,
+          enabled: i.enabled, runningNow: i.runningNow, rssBytes: i.rssBytes,
         })),
+        note: 'NexaFiles can switch these on and off from its Startup view. This ' +
+              'tool only reads them — it never changes one, and must not claim to.',
       };
     },
 

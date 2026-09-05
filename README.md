@@ -30,6 +30,15 @@ Files are only hashed in full after they have already matched on exact size *and
 on their first and last 4 KB. Hashing every file on a disk is the standard naive
 approach and it turns a minutes-long scan into an hours-long one.
 
+Results are drawn as groups, each with a header saying how many copies it holds
+and what keeping one would save, and every file in a group opens — either in the
+application that owns it, or in its folder. Deciding which of five identical
+files to keep means looking at them, and a list you can only read is a list you
+cannot act on. A search this long must also be stoppable: the Stop button under
+the progress bar hands back what was found by the time it stopped, and everything
+downstream — the panel, the plan, the assistant — is told the search was cut
+short, so a partial total is never presented as a complete one.
+
 **A real file manager.** The Files view browses the machine the way Explorer
 does, because that is the view people already know how to read: folders first,
 the same four columns (Name, Date modified, Type, Size), double-click to open,
@@ -85,8 +94,23 @@ again from zero after a restart. Samples from previous boots are deleted, not
 averaged in. The panel always states how much of the session it actually
 observed — NexaFiles cannot sample time during which it was not running.
 
-**Startup and background load.** What runs at login, with the evidence for each.
-Reported, never silently changed.
+**Startup and background load.** What runs at login, with the evidence for each
+and what each is costing in memory right now — a list of forty names with no
+figures against them cannot tell you which one to switch off. Entries can be
+switched off from here, never silently: on Windows this writes the same
+`StartupApproved` byte Task Manager writes, so the entry stays exactly where its
+installer put it and Windows is simply told to skip it. Nothing is deleted, and
+every switch has an equal switch back. Machine-wide entries and services are
+listed but refuse to change without administrator rights, and say so before you
+press anything rather than after.
+
+A second tab shows what is running *now*, one row per program rather than one per
+process. Closing something there is the only action in NexaFiles with no undo, so
+it is asked to close first — the same request clicking its X makes, which lets a
+program with unsaved work put up its own prompt — and only terminated if it does
+not go. Processes Windows needs are refused outright rather than warned about,
+and so is security software: freeing a few hundred megabytes is not worth leaving
+the machine unprotected.
 
 **System visibility.** CPU, memory, and per-process usage. There is deliberately
 no "free up RAM" button; see *What this deliberately does not do*.
@@ -147,6 +171,20 @@ passes through the same five stages. No code path bypasses it.
    the removal. `fs.unlink` is never used on a first pass.
 5. **Reverse** — quarantine retains for 30 days with one-click restore to the
    original location.
+
+**What quarantine is, since the name is jargon.** It is not an antivirus
+quarantine and it is not a second recycle bin. It is the undo for the one class
+of deletion the recycle bin handles badly. Files you would recognise — a photo, a
+document, a download — go to the recycle bin, because that is the undo you
+already know how to use. What comes here instead is application *internals*:
+leftover cache and support folders from under `AppData`, which have to go back to
+the exact path, name and timestamp they came from or the application that owns
+them will behave as though its data is gone. Dragging a folder back out of the
+recycle bin does not reliably do that; restoring from here does, and if the
+original path is occupied it restores alongside rather than overwriting whatever
+now lives there. Each entry also keeps the evidence that justified its removal,
+so if something breaks a week later the question "what was taken, and why" has an
+answer instead of a guess. Nothing is actually deleted until the 30 days are up.
 
 **Hard rules enforced in code, not by convention:**
 

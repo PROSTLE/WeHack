@@ -24,10 +24,12 @@ const duplicates = require('../scanners/duplicates');
 const contentDupes = require('../scanners/content-dupes');
 const { findLeftovers, leftoversToPlanEntries } = require('../scanners/leftovers');
 const { listStartupItems } = require('../scanners/startup');
+const startupControl = require('../system/startup-control');
+const processControl = require('../system/process-control');
 const metrics = require('../system/metrics');
 const drives = require('../system/drives');
 const machine = require('../system/machine');
-const { listProcesses, sampleCpuByProcess } = require('../system/processes');
+const { listProcesses, sampleCpuByProcess, groupByProgram } = require('../system/processes');
 const sessionInfo = require('../system/session');
 const overlay = require('../overlay');
 const wakeWindow = require('../wake/window');
@@ -720,9 +722,26 @@ function register(state, mainWindow) {
    * compare and is refused rather than silently returning nothing. It is checked
    * against the approved roots as well, because the renderer names the path.
    */
+  // ── stopping a scan that is already running ──────────────────────────────
+  //
+  // Comparing a disk's worth of files takes minutes, and the only honest thing
+  // to do about that is to let the user call it off. Every scanner already
+  // takes a `shouldCancel` predicate and checks it between files; these flags
+  // are what the Cancel button sets, and nothing else reads them.
+  //
+  // A cancelled scan returns what it had found by the time it stopped, marked
+  // as partial. Throwing it away would waste work the user paid the wait for,
+  // and returning it unmarked would let a partial count be read as a complete
+  // one — so it comes back with `cancelled: true` and the interface says so.
+  const cancelling = { duplicates: false, leftovers: false };
+
+  handle('duplicates:cancel', async () => { cancelling.duplicates = true; return true; });
+  handle('leftovers:cancel', async () => { cancelling.leftovers = true; return true; });
+
   handle('duplicates:find', async (tier, { under = null } = {}) => {
     const scan = state.currentScan();
     if (!scan) throw new Error('No scan has run yet. Scan a folder first.');
+    cancelling.duplicates = false;
 
     let scope = null;
     if (under) {
@@ -740,7 +759,7 @@ function register(state, mainWindow) {
     }
 
     const onProgress = (p) => send('scan:progress', { ...p, scanId: scan.id });
-    const opts = { onProgress, under: scope };
+    const opts = { onProgress, under: scope, shouldCancel: () => cancelling.duplicates };
 
     let out;
     if (tier === 'image') {
@@ -762,9 +781,17 @@ function register(state, mainWindow) {
     // subtree's findings as though they covered the scan would have it reporting
     // a reclaimable total for the disk that was only ever measured for one
     // folder — exactly the kind of unearned number this application refuses.
+    const cancelled = cancelling.duplicates;
+    cancelling.duplicates = false;
+
     const key = tier === 'image' ? 'image' : tier === 'text' ? 'text'
       : tier === 'video' ? 'video' : 'exact';
-    state.lastDuplicates[key] = scope ? null : out;
+    // A cancelled search stopped partway through the disk. Its findings are
+    // real — each group was verified before it was reported — but its absences
+    // are not, and its total is a floor rather than a figure. So it is kept, so
+    // that a plan can still be built from what was genuinely found, and marked,
+    // so that nothing downstream can present the total as a complete answer.
+    state.lastDuplicates[key] = scope ? null : (cancelled ? { ...out, partial: true } : out);
 
     state.index.clearDuplicates(scan.id, tierName(tier));
     for (const g of out.groups) state.index.saveDuplicateGroup(scan.id, g);
@@ -776,27 +803,127 @@ function register(state, mainWindow) {
       scope: scope || null,
       scopeName: scope ? path.basename(scope) : null,
       searchedRoot: scope || scan.root,
+      cancelled,
       groups: out.groups,
       stats: out.stats,
       totalWasted: out.groups.reduce((n, g) => n + g.wastedBytes, 0),
-      method: methodDescription(tier),
+      method: methodDescription(tier) +
+        (cancelled
+          ? ' This search was stopped before it finished, so what is listed below ' +
+            'was found but nothing can be concluded from what is missing.'
+          : ''),
     };
   });
 
   // ── leftovers ────────────────────────────────────────────────────────────
   handle('leftovers:find', async () => {
+    cancelling.leftovers = false;
     const out = await findLeftovers({
       listProcesses,
       onProgress: (p) => send('scan:progress', p),
+      shouldCancel: () => cancelling.leftovers,
     });
-    state.lastLeftovers = out;
-    return out;
+    const cancelled = cancelling.leftovers;
+    cancelling.leftovers = false;
+
+    // Kept and marked rather than discarded, for the same reason a cancelled
+    // duplicate search is: the folders it did judge, it judged properly.
+    state.lastLeftovers = cancelled ? { ...out, partial: true } : out;
+    return { ...out, cancelled };
   });
 
-  // ── startup and system ───────────────────────────────────────────────────
+  // ── startup and background load ──────────────────────────────────────────
   handle('startup:list', async () => {
-    state.lastStartup = await listStartupItems();
+    state.lastStartup = await listStartupItems({ listProcesses });
     return state.lastStartup;
+  });
+
+  /**
+   * Switches one startup entry on or off.
+   *
+   * The entry is taken from the last enumeration held in the main process, not
+   * from whatever the renderer sends: the renderer names an item by kind,
+   * source and location, and those three have to match something this process
+   * actually found. A renderer that asked to disable an arbitrary registry
+   * value it made up therefore gets a refusal, not a write.
+   */
+  handle('startup:setEnabled', async (ref, enabled) => {
+    const known = state.lastStartup?.items || [];
+    if (!known.length) {
+      throw new Error('The startup list has not been read yet. List the items first.');
+    }
+    const item = known.find((it) =>
+      it.kind === ref?.kind && it.source === ref?.source &&
+      it.location === ref?.location && it.name === ref?.name);
+    if (!item) {
+      throw new Error(
+        'That startup entry is not in the list NexaFiles read. Refresh the list ' +
+        'and try again.');
+    }
+
+    const result = await startupControl.setStartupItemEnabled(item, !!enabled);
+    // Keep the cached list truthful, so a second click on the same row is
+    // acting on the state the machine is actually in.
+    item.enabled = !!enabled;
+    item.evidence = result.evidence;
+    return { ...result, item };
+  });
+
+  /** The full background load, one row per program rather than per process. */
+  handle('system:background', async ({ withCpu = false } = {}) => {
+    const procs = await listProcesses();
+    const cpu = withCpu ? await sampleCpuByProcess(1000) : [];
+    const groups = groupByProgram(procs, cpu).map((g) => ({
+      ...g,
+      // Only what the row needs; thirty renderer processes' worth of detail is
+      // not something to push across IPC on every refresh.
+      members: g.members.slice(0, 40).map((m) => ({ pid: m.pid, rssBytes: m.rssBytes })),
+      // Every pid in the group, not just the first: NexaFiles is itself several
+      // processes under one name, and the group has to be recognised as its own.
+      control: processControl.classifyProcess({ pid: g.pids[0], pids: g.pids, name: g.name }),
+    }));
+    return {
+      groups,
+      processCount: procs.length,
+      totalRssBytes: procs.reduce((n, p) => n + (p.rssBytes || 0), 0),
+      cpuMeasured: withCpu,
+      measuredAt: new Date().toISOString(),
+    };
+  });
+
+  /**
+   * Closes every process belonging to one program.
+   *
+   * Each pid is reported separately for the same reason a multi-file trash is:
+   * one refusal must not silently stand in for the rest, and the user is told
+   * exactly which ones went and how.
+   */
+  handle('system:endProgram', async (name, pids, { force = true } = {}) => {
+    if (!name || !Array.isArray(pids) || !pids.length) {
+      throw new Error('No program was named.');
+    }
+    const verdict = processControl.classifyProcess({ pid: pids[0], pids, name });
+    if (!verdict.closable) {
+      const err = new Error(verdict.reason);
+      err.code = 'PROTECTED';
+      throw err;
+    }
+
+    const results = [];
+    for (const pid of pids.slice(0, 200)) {
+      try {
+        results.push({ ok: true, ...await processControl.endProcess({ pid, pids, name }, { force }) });
+      } catch (err) {
+        results.push({ ok: false, pid, name, detail: err.message, code: err.code || null });
+      }
+    }
+    return {
+      name,
+      closed: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+      forced: results.some((r) => r.ok && r.forced),
+      results,
+    };
   });
 
   handle('system:load', async () => {
@@ -911,6 +1038,14 @@ function register(state, mainWindow) {
       : duplicates.duplicatesToPlanEntries(found.groups, { Plan, CATEGORY, ACTION, CONFIDENCE });
     for (const spec of specs) plan.add(spec);
     for (const n of (found.notes || [])) plan.addNote(n);
+    if (found.partial) {
+      plan.addNote(
+        'The search this plan came from was stopped before it finished. Every ' +
+        'item below was found and verified in the normal way, so the plan itself ' +
+        'is sound — but it is not the whole disk, and the total is the least you ' +
+        'could reclaim rather than the most.'
+      );
+    }
     if (key !== 'exact') {
       plan.addNote(
         'These files are not byte-identical. They were matched by perceptual hashing, ' +
@@ -930,6 +1065,13 @@ function register(state, mainWindow) {
       roots: roots.listRoots(),
       notes: [...state.lastLeftovers.notes],
     });
+    if (state.lastLeftovers.partial) {
+      plan.addNote(
+        'The sweep this plan came from was stopped before it finished. Each folder ' +
+        'below was judged in the normal way; the folders it never reached are simply ' +
+        'not represented here.'
+      );
+    }
     for (const spec of leftoversToPlanEntries(state.lastLeftovers.findings, { ACTION, CATEGORY, CONFIDENCE })) {
       // Skip anything outside an approved root rather than proposing something
       // that would be refused at execution time.

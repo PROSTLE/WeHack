@@ -89,7 +89,10 @@ export function statCards(summary, { formatBytes, splitBytes }) {
 
         let badge;
         if (delta === null || delta === undefined) {
-          badge = `<span class="delta none" title="A change figure needs two scans of the same folder to compare">first scan</span>`;
+          // "first scan" read as a caption for the sparkline beside it, which
+          // is a different measurement entirely. It is a statement about there
+          // being nothing to compare against, so it now says that.
+          badge = `<span class="delta none" title="A change figure needs two scans of the same folder to compare against. This is the first.">no earlier scan</span>`;
         } else if (delta === 0) {
           badge = `<span class="delta none">no change</span>`;
         } else {
@@ -108,7 +111,12 @@ export function statCards(summary, { formatBytes, splitBytes }) {
               <span>${esc(CATEGORY_LABEL[c.category] || c.category)}</span>
             </div>
             <div class="stat-value">${esc(value)}<span class="stat-unit">${esc(unit)}</span></div>
-            ${spark ? `<div class="stat-spark">${spark}</div>` : ''}
+            ${spark ? `
+              <div class="stat-spark"
+                   title="Bytes in this category by the month each file was last changed. This is a shape, not a trend line: it says when the files were written, not how the category has grown.">
+                ${spark}
+                <span class="spark-caption">by month last changed</span>
+              </div>` : ''}
             <div class="stat-foot">
               <span>${esc(Number(c.count).toLocaleString())} files</span>
               ${badge}
@@ -127,78 +135,64 @@ export function storagePanel(summary, { formatBytes }) {
   // The drive the scanned folder actually lives on.
   const rootDrive = drives.find((d) =>
     scan.root.toLowerCase().startsWith(d.path.toLowerCase())) || drives[0];
+  if (!rootDrive) return '';
 
-  const segments = categories.map((c) => ({
-    label: CATEGORY_LABEL[c.category] || c.category,
-    bytes: c.bytes,
-    colour: blockColour(c.category, null).css,
-  }));
   const scanned = categories.reduce((n, c) => n + c.bytes, 0);
 
-  // Two bars, because one cannot do both jobs. The first shows what the scan is
-  // made of, at full width. The second places that against the whole drive —
-  // where a 2 GB folder on a 476 GB disk is genuinely a sliver, and showing it
-  // as anything else would misrepresent the proportion.
-  const driveBar = rootDrive ? [
+  // One bar, not two. This panel used to draw the scan's category breakdown as
+  // well — the same five figures the statistic cards above it and the treemap
+  // legend below it were both already showing, which made three statements of
+  // one fact on a single screen and left the panel's actual subject buried
+  // under them. What only this panel can say is where the scan sits on the
+  // whole drive, so that is all it says now.
+  const driveBar = [
     { label: `Scanned (${formatBytes(scanned)})`, bytes: scanned, colour: PALETTE_SCAN },
     { label: 'Rest of the drive, not examined',
       bytes: Math.max(0, rootDrive.usedBytes - scanned), colour: 'var(--chart-rest)' },
-  ] : null;
+  ];
 
   return `
     <div class="panel raised">
+      <header>
+        <h2>Room on the drive</h2>
+        <span class="muted">what this scan covers, against the whole disk</span>
+      </header>
       <div class="drive-panel">
         <div class="drive-art-wrap">
           ${illustration('drive')}
-          ${rootDrive ? `<div class="drive-caption">
+          <div class="drive-caption">
             <span class="d-id">${esc(rootDrive.id)}</span>
             <span class="d-name">${esc(rootDrive.name)}</span>
             <span class="d-fs">${esc(rootDrive.fileSystem || '')}</span>
-          </div>` : ''}
+          </div>
         </div>
 
         <div>
           <div class="cap-head">
-            <span class="cap-title">Inside this scan</span>
-            <span class="cap-usage"><strong>${esc(formatBytes(scanned))}</strong> measured
-              across ${esc(Number(scan.fileCount).toLocaleString())} files</span>
+            <span class="cap-title">${esc(rootDrive.id)} ${esc(rootDrive.name)}</span>
+            <span class="cap-usage">Using
+              <strong>${esc(formatBytes(rootDrive.usedBytes))}</strong>
+              of ${esc(formatBytes(rootDrive.totalBytes))}</span>
           </div>
-          ${charts.capacityBar(segments, scanned, { height: 15, showRemainder: false })}
+          ${charts.capacityBar(driveBar, rootDrive.totalBytes, { height: 15 })}
           <div class="cap-legend">
-            ${segments.map((b) => `
+            ${driveBar.map((b) => `
               <span class="legend-item">
                 <span class="legend-swatch" style="background:${b.colour}"></span>
                 <span>${esc(b.label)}</span>
                 <span class="legend-bytes">${esc(formatBytes(b.bytes))}</span>
               </span>`).join('')}
+            <span class="legend-item">
+              <span class="legend-swatch" style="background:var(--chart-track)"></span>
+              <span>Free</span>
+              <span class="legend-bytes">${esc(formatBytes(rootDrive.freeBytes))}</span>
+            </span>
           </div>
-
-          ${driveBar ? `
-            <div class="cap-head" style="margin-top:20px">
-              <span class="cap-title">${esc(rootDrive.id)} ${esc(rootDrive.name)}</span>
-              <span class="cap-usage">Using
-                <strong>${esc(formatBytes(rootDrive.usedBytes))}</strong>
-                of ${esc(formatBytes(rootDrive.totalBytes))}</span>
-            </div>
-            ${charts.capacityBar(driveBar, rootDrive.totalBytes, { height: 15 })}
-            <div class="cap-legend">
-              ${driveBar.map((b) => `
-                <span class="legend-item">
-                  <span class="legend-swatch" style="background:${b.colour}"></span>
-                  <span>${esc(b.label)}</span>
-                  <span class="legend-bytes">${esc(formatBytes(b.bytes))}</span>
-                </span>`).join('')}
-              <span class="legend-item">
-                <span class="legend-swatch" style="background:var(--chart-track)"></span>
-                <span>Free</span>
-                <span class="legend-bytes">${esc(formatBytes(rootDrive.freeBytes))}</span>
-              </span>
-            </div>
-            <p class="muted" style="margin:11px 0 0;font-size:12px">
-              Only <span class="mono">${esc(scan.root)}</span> was examined. The grey
-              portion is the rest of the drive, which this scan did not look at —
-              scan a wider folder to account for it.
-            </p>` : ''}
+          <p class="muted" style="margin:11px 0 0;font-size:12px">
+            Only <span class="mono">${esc(scan.root)}</span> was examined. The grey
+            portion is the rest of the drive, which this scan did not look at —
+            scan a wider folder to account for it.
+          </p>
         </div>
       </div>
     </div>`;
