@@ -1,0 +1,2044 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; font-src https://fonts.gstatic.com 'self';" />
+  <title>NexaFiles – AI File Manager</title>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    ::-webkit-scrollbar { width: 7px; height: 7px; }
+    ::-webkit-scrollbar-track { background: #0F172A; }
+    ::-webkit-scrollbar-thumb { background: linear-gradient(180deg,#6366F1,#A855F7); border-radius: 999px; border: 2px solid #0F172A; }
+    ::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg,#7c7ff5,#b96bfa); }
+    * { scrollbar-width: thin; scrollbar-color: #6366F1 #0F172A; }
+
+    :root {
+      --bg:     #0F172A;
+      --bg2:    #1E293B;
+      --bg3:    #1E293B;
+      --bg4:    #334155;
+      --accent: #6366F1;
+      --accent2:#A855F7;
+      --accent3:#34d399;
+      --text:   #F8FAFC;
+      --muted:  #94A3B8;
+      --border: rgba(255,255,255,0.1);
+      --card:   rgba(255,255,255,0.05);
+      --sel:    rgba(99,102,241,0.15);
+    }
+
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: 'DM Sans', sans-serif; font-weight: 300;
+      display: flex; flex-direction: column;
+      user-select: none;
+    }
+
+    /* ══ TITLE BAR ══ */
+    .titlebar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 14px;
+      background: #0a1628;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      -webkit-app-region: drag; /* makes titlebar draggable in Electron */
+    }
+
+    .titlebar-logo {
+      display: flex; align-items: center; gap: 8px;
+      font-family: 'Syne', sans-serif; font-weight: 800;
+      font-size: 0.9rem; letter-spacing: -0.02em;
+      -webkit-app-region: no-drag;
+    }
+
+    .logo-icon {
+      width: 24px; height: 24px;
+      background: linear-gradient(135deg,var(--accent),var(--accent2));
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.75rem;
+    }
+
+    .titlebar-title { flex: 1; font-size: 0.78rem; color: var(--muted); text-align: center; }
+
+    .win-controls { display: flex; margin-left: auto; -webkit-app-region: no-drag; }
+    .win-btn {
+      width: 42px; height: 30px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.7rem; color: var(--muted);
+      cursor: pointer; transition: background 0.15s; border-radius: 0;
+    }
+    .win-btn:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+    .win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+    /* ══ RIBBON ══ */
+    .ribbon {
+      display: flex; align-items: center; gap: 2px;
+      padding: 4px 10px;
+      background: #1E293B;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0; flex-wrap: wrap;
+    }
+
+    .rib-btn {
+      display: flex; flex-direction: column; align-items: center;
+      padding: 4px 10px; border-radius: 6px; gap: 2px;
+      font-size: 0.6rem; color: var(--muted);
+      cursor: pointer; transition: all 0.15s; min-width: 42px;
+      border: none; background: transparent;
+    }
+    .rib-btn:hover { background: rgba(255,255,255,0.07); color: var(--text); }
+    .rib-btn:disabled { opacity: 0.3; cursor: default; }
+    .rib-btn:disabled:hover { background: transparent; }
+    .rib-btn .ri { font-size: 1rem; }
+    .rib-btn.ai-btn { color: var(--accent2); }
+    .rib-btn.ai-btn:hover { background: rgba(168,85,247,0.15); }
+    .rib-btn.danger-btn { color: #ef4444; }
+    .rib-btn.danger-btn:hover { background: rgba(239,68,68,0.1); }
+
+    .rib-sep { width: 1px; height: 28px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
+
+    /* ══ ADDRESS BAR ══ */
+    .addressbar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px;
+      background: #0F172A;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .addr-nav { display: flex; gap: 3px; }
+    .addr-nav-btn {
+      width: 26px; height: 26px; border-radius: 5px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.75rem; color: var(--muted); cursor: pointer;
+      transition: background 0.15s; border: none; background: transparent;
+    }
+    .addr-nav-btn:hover:not(:disabled) { background: rgba(255,255,255,0.07); color: var(--text); }
+    .addr-nav-btn:disabled { opacity: 0.3; cursor: default; }
+
+    .addr-path {
+      flex: 1; background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 7px; padding: 5px 12px;
+      font-size: 0.78rem; color: var(--muted);
+      display: flex; align-items: center; gap: 5px; overflow: hidden;
+    }
+    .addr-path .sep { color: rgba(255,255,255,0.2); }
+    .addr-path .seg { cursor: pointer; transition: color 0.15s; white-space: nowrap; }
+    .addr-path .seg:hover { color: var(--accent); }
+
+    .addr-search-wrap { position: relative; }
+    .addr-search {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 7px; padding: 5px 12px 5px 30px;
+      font-size: 0.78rem; color: var(--text);
+      width: 200px; outline: none; font-family: inherit;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .addr-search::placeholder { color: var(--muted); }
+    .addr-search:focus { border-color: rgba(99,102,241,0.5); box-shadow: 0 0 0 2px rgba(99,102,241,0.1); }
+    .search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; color: var(--muted); pointer-events: none; }
+
+    /* ══ BODY ══ */
+    .app-body { display: flex; flex: 1; overflow: hidden; }
+
+    /* ══ SIDEBAR ══ */
+    .sidebar {
+      width: 210px; flex-shrink: 0;
+      background: var(--bg2);
+      border-right: 1px solid var(--border);
+      overflow-y: auto; padding: 10px 0;
+      display: flex; flex-direction: column;
+    }
+
+    .sec-label {
+      font-size: 0.62rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.1em;
+      color: var(--muted); padding: 10px 16px 5px;
+    }
+
+    .nav-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 7px 16px; border-radius: 0;
+      font-size: 0.82rem; color: var(--muted);
+      cursor: pointer; transition: all 0.15s;
+      border-left: 2px solid transparent;
+    }
+    .nav-item:hover { background: rgba(255,255,255,0.04); color: var(--text); }
+    .nav-item.active { background: var(--sel); color: var(--accent); border-left-color: var(--accent); }
+    .nav-item .ni { font-size: 0.95rem; width: 18px; text-align: center; }
+    .nav-item .badge {
+      margin-left: auto; font-size: 0.65rem;
+      background: rgba(99,102,241,0.2); color: var(--accent);
+      padding: 1px 7px; border-radius: 999px;
+    }
+    .nav-item .badge.red { background: rgba(239,68,68,0.15); color: #ef4444; }
+
+    /* ══ MAIN CONTENT ══ */
+    .main-content {
+      flex: 1; display: flex; flex-direction: column; overflow: hidden;
+      background: var(--bg);
+    }
+
+    .content-toolbar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .content-title {
+      font-family: 'Syne', sans-serif; font-weight: 700;
+      font-size: 0.95rem; letter-spacing: -0.02em;
+    }
+
+    .sort-btn, .view-btn {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 13px; border-radius: 8px;
+      font-size: 0.78rem; color: var(--muted);
+      cursor: pointer; border: 1px solid var(--border);
+      background: var(--card); transition: all 0.15s;
+      font-family: inherit;
+    }
+    .sort-btn:hover, .view-btn:hover { color: var(--text); border-color: rgba(255,255,255,0.15); }
+
+    .ai-search-bar {
+      flex: 1; display: flex; align-items: center; gap: 8px;
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 9px; padding: 7px 14px;
+      font-size: 0.82rem; color: var(--muted);
+      cursor: text; transition: border-color 0.2s;
+    }
+    .ai-search-bar input {
+      flex: 1; background: none; border: none; outline: none;
+      font-family: inherit; font-size: 0.82rem; color: var(--text);
+    }
+    .ai-search-bar input::placeholder { color: var(--muted); }
+    .ai-search-bar:focus-within { border-color: rgba(99,102,241,0.5); }
+
+    .ai-tag-inline {
+      font-size: 0.65rem; padding: 2px 8px;
+      background: rgba(168,85,247,0.15); color: var(--accent2);
+      border-radius: 999px; border: 1px solid rgba(168,85,247,0.25);
+      white-space: nowrap; cursor: pointer; transition: background 0.15s;
+    }
+    .ai-tag-inline:hover { background: rgba(168,85,247,0.25); }
+
+    /* ══ FILE GRID ══ */
+    .files-area { flex: 1; overflow-y: auto; padding: 16px; }
+
+    .files-section-title {
+      font-size: 0.72rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--muted); margin-bottom: 12px; margin-top: 4px;
+    }
+
+    .files-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      gap: 10px; margin-bottom: 20px;
+    }
+
+    .file-card {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 11px; padding: 14px 10px;
+      display: flex; flex-direction: column; align-items: center; gap: 7px;
+      cursor: pointer; transition: all 0.18s; text-align: center;
+      position: relative;
+    }
+    .file-card:hover { border-color: rgba(99,102,241,0.3); background: rgba(99,102,241,0.05); transform: translateY(-1px); }
+    .file-card.selected { border-color: var(--accent); background: var(--sel); box-shadow: 0 0 0 1px rgba(99,102,241,0.25); }
+    .file-card.ai-pick { border-color: rgba(168,85,247,0.4); background: rgba(168,85,247,0.08); }
+    .file-card.dup { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.04); }
+
+    .file-icon { font-size: 2rem; line-height: 1; }
+    .file-name { font-size: 0.72rem; color: var(--text); font-weight: 400; word-break: break-all; line-height: 1.3; }
+    .file-size { font-size: 0.63rem; color: var(--muted); }
+    .file-badge {
+      font-size: 0.55rem; padding: 2px 6px;
+      border-radius: 4px; font-weight: 600; letter-spacing: 0.04em;
+    }
+    .file-badge.ai  { background: rgba(168,85,247,0.2); color: var(--accent2); }
+    .file-badge.dup { background: rgba(239,68,68,0.2); color: #ef4444; }
+
+    .check-box {
+      position: absolute; top: 7px; right: 7px;
+      width: 16px; height: 16px; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--bg2);
+      display: none; align-items: center; justify-content: center;
+      font-size: 0.6rem; color: var(--accent);
+    }
+    .file-card:hover .check-box,
+    .file-card.selected .check-box { display: flex; }
+    .file-card.selected .check-box { border-color: var(--accent); background: rgba(79,140,255,0.2); }
+
+    /* ══ RIGHT PANEL ══ */
+    .right-panel {
+      width: 240px; flex-shrink: 0;
+      background: var(--bg2); border-left: 1px solid var(--border);
+      overflow-y: auto; display: flex; flex-direction: column;
+    }
+
+    .panel-header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--border);
+      font-family: 'Syne', sans-serif; font-weight: 700;
+      font-size: 0.85rem; letter-spacing: -0.01em;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+
+    .panel-tag {
+      font-size: 0.62rem; padding: 2px 8px;
+      background: rgba(168,85,247,0.15); color: var(--accent2);
+      border-radius: 999px; font-family: 'DM Sans', sans-serif; font-weight: 400;
+    }
+
+    .panel-section { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+    .panel-section-title { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 10px; font-weight: 600; }
+
+    .detail-icon { font-size: 3rem; text-align: center; margin-bottom: 8px; }
+    .detail-name { font-size: 0.85rem; font-weight: 500; text-align: center; word-break: break-all; margin-bottom: 4px; }
+    .detail-meta { font-size: 0.75rem; color: var(--muted); text-align: center; }
+
+    .detail-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 5px 0; font-size: 0.78rem;
+    }
+    .detail-row .dk { color: var(--muted); }
+    .detail-row .dv { color: var(--text); }
+
+    .suggestion-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 9px; padding: 10px 12px; margin-bottom: 8px;
+      font-size: 0.78rem; cursor: pointer; transition: all 0.15s;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .suggestion-card:hover { border-color: rgba(99,102,241,0.3); background: rgba(99,102,241,0.06); }
+    .sug-icon { font-size: 1.1rem; flex-shrink: 0; }
+    .sug-text { color: var(--muted); line-height: 1.4; }
+    .sug-text strong { color: var(--text); display: block; margin-bottom: 1px; }
+
+    /* ══ STATUS BAR ══ */
+    .statusbar {
+      display: flex; align-items: center; gap: 20px;
+      padding: 5px 16px;
+      background: #0a1628; border-top: 1px solid var(--border);
+      font-size: 0.72rem; color: var(--muted); flex-shrink: 0;
+    }
+    .statusbar .sel-count { color: var(--accent); }
+    .statusbar .spacer { flex: 1; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent3); box-shadow: 0 0 6px var(--accent3); animation: blink 2s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* ══ MODALS ══ */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      z-index: 1000; display: none; align-items: center; justify-content: center;
+      backdrop-filter: blur(4px);
+    }
+    .modal-overlay.show { display: flex; }
+
+    .modal {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 16px; padding: 28px;
+      width: 400px; max-width: 90vw;
+      box-shadow: 0 40px 80px rgba(0,0,0,0.6);
+      animation: popIn 0.2s ease both;
+    }
+    @keyframes popIn { from{opacity:0;transform:scale(0.94)} to{opacity:1;transform:scale(1)} }
+
+    .modal-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 1.05rem; margin-bottom: 8px; letter-spacing: -0.02em; }
+    .modal-sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; line-height: 1.6; }
+
+    .modal-input {
+      width: 100%; background: var(--bg2); border: 1px solid var(--border);
+      border-radius: 9px; padding: 10px 14px; color: var(--text);
+      font-family: inherit; font-size: 0.9rem; outline: none; margin-bottom: 16px;
+      transition: border-color 0.2s;
+    }
+    .modal-input:focus { border-color: rgba(99,102,241,0.5); box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+    .mbtn {
+      padding: 9px 20px; border-radius: 9px;
+      font-family: inherit; font-size: 0.85rem; cursor: pointer;
+      transition: all 0.15s; border: none;
+    }
+    .mbtn-ghost { background: var(--card); color: var(--muted); border: 1px solid var(--border); }
+    .mbtn-ghost:hover { color: var(--text); }
+    .mbtn-primary { background: linear-gradient(135deg, #6366F1, #A855F7); color: #fff; box-shadow: 0 4px 14px rgba(99,102,241,0.3); }
+    .mbtn-primary:hover { transform: translateY(-1px); }
+    .mbtn-danger { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.2); }
+    .mbtn-danger:hover { background: rgba(239,68,68,0.25); }
+
+    /* ══ TOAST ══ */
+    .toast {
+      position: fixed; bottom: 36px; left: 50%;
+      transform: translateX(-50%) translateY(60px);
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 12px; padding: 12px 20px;
+      font-size: 0.84rem; color: var(--text);
+      display: flex; align-items: center; gap: 9px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+      transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1), opacity 0.25s;
+      opacity: 0; z-index: 9999; white-space: nowrap;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+    .toast.success { border-color: rgba(52,211,153,0.3); }
+    .toast.error   { border-color: rgba(239,68,68,0.3); }
+    .toast.info    { border-color: rgba(99,102,241,0.4); }
+
+    /* Context menu */
+    .ctx-menu {
+      position: fixed; z-index: 500;
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 10px; padding: 6px;
+      min-width: 170px;
+      box-shadow: 0 16px 40px rgba(0,0,0,0.5);
+      display: none;
+      animation: popIn 0.15s ease both;
+    }
+    .ctx-menu.show { display: block; }
+
+    .ctx-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 8px 12px; border-radius: 7px;
+      font-size: 0.82rem; color: var(--muted);
+      cursor: pointer; transition: all 0.12s;
+    }
+    .ctx-item:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+    .ctx-item.danger:hover { background: rgba(239,68,68,0.1); color: #ef4444; }
+    .ctx-sep { height: 1px; background: var(--border); margin: 4px 0; }
+
+    .empty-state {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 10px;
+      color: var(--muted); font-size: 0.85rem; padding: 60px 20px;
+      text-align: center;
+    }
+    .empty-state .ei { font-size: 2.5rem; opacity: 0.4; }
+
+    /* ══ AI CHATBOT ══ */
+    .chat-messages {
+      flex: 1; overflow-y: auto; padding: 16px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+
+    .chat-bubble {
+      display: flex; gap: 10px; align-items: flex-start;
+      animation: slideIn 0.3s ease;
+    }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    .chat-bubble.user { flex-direction: row-reverse; }
+
+    .chat-avatar {
+      width: 32px; height: 32px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1rem; flex-shrink: 0;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      box-shadow: 0 4px 12px rgba(99,102,241,0.3);
+    }
+
+    .chat-bubble.user .chat-avatar {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      box-shadow: none;
+    }
+
+    .chat-content {
+      flex: 1; display: flex; flex-direction: column; gap: 6px;
+      max-width: 85%;
+    }
+
+    .chat-text {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 12px; padding: 10px 14px;
+      font-size: 0.82rem; line-height: 1.5;
+      color: var(--text);
+    }
+
+    .chat-bubble.ai .chat-text {
+      background: rgba(99,102,241,0.08);
+      border-color: rgba(99,102,241,0.2);
+    }
+
+    .chat-bubble.user .chat-text {
+      background: var(--bg3);
+    }
+
+    .chat-time {
+      font-size: 0.65rem; color: var(--muted);
+      padding: 0 4px;
+    }
+
+    /* Quick Actions */
+    .quick-actions {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      margin-top: 8px;
+    }
+
+    .quick-action-btn {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 9px; padding: 10px;
+      display: flex; flex-direction: column; align-items: center; gap: 4px;
+      cursor: pointer; transition: all 0.15s;
+      text-align: center;
+    }
+
+    .quick-action-btn:hover {
+      background: rgba(99,102,241,0.1);
+      border-color: rgba(99,102,241,0.3);
+      transform: translateY(-1px);
+    }
+
+    .qa-icon { font-size: 1.3rem; }
+    .qa-text { font-size: 0.68rem; color: var(--muted); line-height: 1.2; }
+
+    /* Chat Input */
+    .chat-input-wrapper {
+      display: flex; gap: 8px; padding: 12px;
+      border-top: 1px solid var(--border);
+      background: var(--bg2);
+    }
+
+    .chat-input {
+      flex: 1; background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 9px; padding: 10px 14px;
+      font-size: 0.82rem; color: var(--text);
+      font-family: inherit; outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .chat-input::placeholder { color: var(--muted); }
+    .chat-input:focus { border-color: rgba(99,102,241,0.5); }
+
+    .chat-send-btn {
+      width: 40px; height: 40px; border-radius: 9px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border: none; color: #fff; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+      box-shadow: 0 4px 12px rgba(99,102,241,0.25);
+    }
+
+    .chat-send-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(99,102,241,0.35);
+    }
+
+    .chat-send-btn:active { transform: translateY(0); }
+
+    /* Typing indicator */
+    .typing-indicator {
+      display: flex; gap: 4px; padding: 8px 12px;
+    }
+    .typing-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--accent);
+      animation: typing 1.4s infinite;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typing { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-4px); } }
+
+    /* ══ DROP ZONE ══ */
+    .drop-zone {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 16px; border-radius: 8px;
+      background: rgba(168,85,247,0.1); border: 2px dashed rgba(168,85,247,0.3);
+      cursor: pointer; transition: all 0.2s;
+      margin: 0 4px;
+    }
+    .drop-zone:hover { background: rgba(168,85,247,0.15); border-color: rgba(168,85,247,0.5); transform: translateY(-1px); }
+    .drop-zone.drag-over { background: rgba(168,85,247,0.25); border-color: var(--accent2); box-shadow: 0 0 0 3px rgba(168,85,247,0.1); }
+    .dz-icon { font-size: 1.1rem; }
+    .dz-text { font-size: 0.72rem; color: var(--accent2); font-weight: 500; }
+
+    /* ══ COMMAND PALETTE ══ */
+    .command-palette-btn {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 14px; border-radius: 8px;
+      background: var(--card); border: 1px solid var(--border);
+      color: var(--muted); cursor: pointer;
+      transition: all 0.15s; font-family: inherit; font-size: 0.78rem;
+    }
+    .command-palette-btn:hover { background: rgba(99,102,241,0.1); border-color: rgba(99,102,241,0.3); color: var(--text); }
+    .kbd {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 4px; padding: 2px 6px;
+      font-size: 0.7rem; font-family: monospace;
+    }
+
+    .command-palette-modal {
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: 16px; width: 600px; max-width: 90vw;
+      box-shadow: 0 40px 100px rgba(0,0,0,0.8);
+      animation: slideDown 0.2s ease both;
+      overflow: hidden;
+    }
+    @keyframes slideDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+
+    .cp-search-wrapper {
+      display: flex; align-items: center; gap: 12px;
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+    }
+
+    .cp-input {
+      flex: 1; background: transparent; border: none;
+      outline: none; font-size: 1rem; color: var(--text);
+      font-family: inherit;
+    }
+    .cp-input::placeholder { color: var(--muted); }
+
+    .cp-hint {
+      font-size: 0.7rem; color: var(--muted);
+      background: var(--bg3); border: 1px solid var(--border);
+      padding: 2px 8px; border-radius: 4px;
+      font-family: monospace;
+    }
+
+    .cp-results {
+      max-height: 400px; overflow-y: auto;
+    }
+
+    .cp-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 20px; cursor: pointer;
+      transition: background 0.1s;
+      border-left: 3px solid transparent;
+    }
+    .cp-item:hover, .cp-item.selected {
+      background: rgba(99,102,241,0.08);
+      border-left-color: var(--accent);
+    }
+
+    .cp-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--card); font-size: 1.1rem;
+      flex-shrink: 0;
+    }
+
+    .cp-content { flex: 1; min-width: 0; }
+    .cp-title { font-size: 0.9rem; color: var(--text); font-weight: 500; margin-bottom: 2px; }
+    .cp-subtitle { font-size: 0.75rem; color: var(--muted); }
+
+    .cp-meta {
+      font-size: 0.7rem; color: var(--muted);
+      display: flex; align-items: center; gap: 8px;
+    }
+
+    .cp-category {
+      font-size: 0.7rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted);
+      padding: 8px 20px 4px; font-weight: 600;
+    }
+
+    /* ══ FILE CARD BADGES ══ */
+    .file-badges {
+      position: absolute; top: 7px; left: 7px;
+      display: flex; gap: 4px; flex-direction: column;
+    }
+
+    .mini-badge {
+      font-size: 0.6rem; padding: 2px 5px;
+      border-radius: 4px; font-weight: 600;
+      display: flex; align-items: center; gap: 3px;
+      width: fit-content;
+    }
+
+    .mini-badge.pii { background: rgba(239,68,68,0.2); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+    .mini-badge.sensitive { background: rgba(251,191,36,0.2); color: #f59e0b; border: 1px solid rgba(251,191,36,0.3); }
+    .mini-badge.compressed { background: rgba(52,211,153,0.2); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+
+    /* ══ STORAGE DASHBOARD ══ */
+    .dashboard-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px; padding: 16px;
+    }
+
+    .dashboard-card {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px;
+      transition: all 0.2s;
+    }
+    .dashboard-card:hover { border-color: rgba(99,102,241,0.3); transform: translateY(-2px); }
+
+    .dc-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .dc-title {
+      font-size: 0.8rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted); font-weight: 600;
+    }
+
+    .dc-icon {
+      font-size: 1.8rem; opacity: 0.6;
+    }
+
+    .dc-value {
+      font-size: 2.2rem; font-family: 'Syne', sans-serif;
+      font-weight: 700; color: var(--text);
+      margin-bottom: 8px;
+    }
+
+    .dc-label {
+      font-size: 0.8rem; color: var(--muted);
+    }
+
+    .dc-progress {
+      height: 8px; background: var(--bg2);
+      border-radius: 999px; overflow: hidden;
+      margin-top: 12px;
+    }
+
+    .dc-progress-bar {
+      height: 100%; border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      transition: width 0.6s ease;
+    }
+
+    .dc-list {
+      display: flex; flex-direction: column; gap: 8px;
+      margin-top: 12px;
+    }
+
+    .dc-list-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 12px; background: var(--card);
+      border-radius: 8px; font-size: 0.82rem;
+    }
+
+    .dc-list-label { color: var(--muted); }
+    .dc-list-value { color: var(--text); font-weight: 500; }
+
+    /* ══ FILE SELECTION CHIPS IN CHAT ══ */
+    .file-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 8px; padding: 6px 10px;
+      font-size: 0.75rem; color: var(--text);
+      margin: 4px 0;
+    }
+
+    .file-chip .fc-icon { font-size: 1rem; }
+    .file-chip .fc-name { font-weight: 500; }
+  </style>
+</head>
+<body>
+
+<!-- TITLE BAR -->
+<div class="titlebar">
+  <div class="titlebar-logo">
+    <div class="logo-icon">📁</div>
+    NexaFiles
+  </div>
+  <div class="titlebar-title" id="titlebar-title">NexaFiles AI — My Files</div>
+  <div class="win-controls">
+    <div class="win-btn" title="Minimize" onclick="winMinimize()">&#8212;</div>
+    <div class="win-btn" title="Maximize" onclick="winMaximize()">&#9633;</div>
+    <div class="win-btn close" title="Close" onclick="winClose()">&#10005;</div>
+  </div>
+</div>
+
+<!-- RIBBON -->
+<div class="ribbon">
+  <button class="rib-btn" onclick="browseFiles()"><span class="ri">📂</span>Browse</button>
+  <div class="rib-sep"></div>
+  <button class="rib-btn" id="rb-copy"   onclick="copySelected()"   disabled><span class="ri">📋</span>Copy</button>
+  <button class="rib-btn" id="rb-cut"    onclick="cutSelected()"    disabled><span class="ri">✂️</span>Cut</button>
+  <button class="rib-btn" id="rb-paste"  onclick="pasteFiles()"     disabled><span class="ri">📌</span>Paste</button>
+  <div class="rib-sep"></div>
+  <button class="rib-btn" id="rb-delete" onclick="deleteSelected()" disabled><span class="ri">🗑️</span>Delete</button>
+  <button class="rib-btn" id="rb-rename" onclick="openRename()"     disabled><span class="ri">✏️</span>Rename</button>
+  <div class="rib-sep"></div>
+  <button class="rib-btn" onclick="openNewFolder()"><span class="ri">📂</span>New Folder</button>
+  <div class="rib-sep"></div>
+  <div class="drop-zone" id="drop-zone" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+    <span class="dz-icon">🎯</span>
+    <span class="dz-text">Drop to Auto-Sort</span>
+  </div>
+  <div class="rib-sep"></div>
+  <button class="rib-btn ai-btn"     onclick="focusAISearch()"><span class="ri">🔍</span>AI Search</button>
+  <button class="rib-btn danger-btn" onclick="showDuplicates()"><span class="ri">🪞</span>Duplicates</button>
+  <div class="rib-sep"></div>
+  <button class="rib-btn" onclick="selectAll()"><span class="ri">☑️</span>Select All</button>
+  <button class="rib-btn" onclick="clearSelection()"><span class="ri">✖</span>Deselect</button>
+</div>
+
+<!-- ADDRESS BAR -->
+<div class="addressbar">
+  <div class="addr-nav">
+    <button class="addr-nav-btn" id="btn-back" title="Back" onclick="goBack()" disabled>&#8592;</button>
+    <button class="addr-nav-btn" id="btn-fwd"  title="Forward" onclick="goForward()" disabled>&#8594;</button>
+    <button class="addr-nav-btn" title="Up" onclick="goUp()">&#8593;</button>
+  </div>
+  <div class="addr-path" id="addr-path"><span class="ni">🖥️</span></div>
+  <div class="addr-search-wrap">
+    <span class="search-icon">🔍</span>
+    <input class="addr-search" id="quick-search" placeholder="Quick search…" oninput="quickSearch(this.value)" />
+  </div>
+</div>
+
+<!-- APP BODY -->
+<div class="app-body">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="sec-label">Smart Views</div>
+    <div class="nav-item" id="nav-insights" onclick="loadView('insights')"><span class="ni">📊</span> Storage Health <span class="badge" style="background:rgba(52,211,153,0.2);color:#34d399;">+2.4GB</span></div>
+    <div class="nav-item active" id="nav-ai"   onclick="loadView('ai')">   <span class="ni">✨</span> AI Suggested <span class="badge" id="badge-ai">6</span></div>
+    <div class="nav-item"       id="nav-recent" onclick="loadView('recent')"><span class="ni">🕐</span> Recent</div>
+    <div class="nav-item"       id="nav-star"  onclick="loadView('star')"> <span class="ni">⭐</span> Starred</div>
+    <div class="nav-item"       id="nav-dups"  onclick="showDuplicates()"> <span class="ni">⚠️</span> Duplicates <span class="badge red" id="badge-dups">4</span></div>
+
+    <div class="sec-label">Categories</div>
+    <div class="nav-item" id="nav-docs"    onclick="loadView('docs')">   <span class="ni">📄</span> Documents   <span class="badge">5</span></div>
+    <div class="nav-item" id="nav-images"  onclick="loadView('images')"> <span class="ni">🖼️</span> Images       <span class="badge">3</span></div>
+    <div class="nav-item" id="nav-videos"  onclick="loadView('videos')"> <span class="ni">🎬</span> Videos</div>
+    <div class="nav-item" id="nav-audio"   onclick="loadView('audio')">  <span class="ni">🎵</span> Audio</div>
+    <div class="nav-item" id="nav-archives"onclick="loadView('archives')"><span class="ni">📦</span> Archives</div>
+
+    <div class="sec-label">Locations</div>
+    <div class="nav-item" id="nav-desktop"   onclick="loadView('desktop')">  <span class="ni">🖥️</span> Desktop</div>
+    <div class="nav-item" id="nav-downloads" onclick="loadView('downloads')"><span class="ni">⬇️</span> Downloads</div>
+    <div class="nav-item" id="nav-documents" onclick="loadView('mydocs')">   <span class="ni">📁</span> My Files</div>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-content">
+    <div class="content-toolbar">
+      <div class="content-title" id="view-title">✨ AI Suggested</div>
+      <button class="command-palette-btn" onclick="openCommandPalette()">
+        <span style="font-size:0.9rem;">⌘</span>
+        <span>Command Palette</span>
+        <span class="kbd">Ctrl+K</span>
+      </button>
+      <button class="sort-btn" onclick="cycleSortMode()">⇅ <span id="sort-label">Name</span></button>
+      <button class="view-btn" onclick="cycleViewMode()"><span id="view-icon">⊞</span></button>
+    </div>
+    <div class="files-area" id="files-area" oncontextmenu="openCtxBg(event)"></div>
+  </div>
+
+  <!-- RIGHT PANEL - AI CHATBOT -->
+  <div class="right-panel">
+    <div class="panel-header">
+      <span>AI Assistant</span>
+      <span class="panel-tag">Online</span>
+    </div>
+    
+    <!-- Chat Messages Area -->
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-bubble ai">
+        <div class="chat-avatar">✨</div>
+        <div class="chat-content">
+          <div class="chat-text">Hi! I'm your AI file assistant. Ask me anything about your files!</div>
+        </div>
+      </div>
+      
+      <!-- Quick Actions -->
+      <div class="quick-actions">
+        <div class="quick-action-btn" onclick="sendQuickPrompt('Show me duplicates')">
+          <span class="qa-icon">🪞</span>
+          <span class="qa-text">Find duplicates</span>
+        </div>
+        <div class="quick-action-btn" onclick="sendQuickPrompt('Organize by type')">
+          <span class="qa-icon">📁</span>
+          <span class="qa-text">Auto-organize</span>
+        </div>
+        <div class="quick-action-btn" onclick="sendQuickPrompt('Show large files')">
+          <span class="qa-icon">📊</span>
+          <span class="qa-text">Large files</span>
+        </div>
+        <div class="quick-action-btn" onclick="sendQuickPrompt('What did I work on today?')">
+          <span class="qa-icon">🕐</span>
+          <span class="qa-text">Recent work</span>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Chat Input -->
+    <div class="chat-input-wrapper">
+      <input 
+        type="text" 
+        class="chat-input" 
+        id="chat-input" 
+        placeholder="Ask AI anything about your files..."
+        onkeydown="if(event.key==='Enter') sendMessage()"
+      />
+      <button class="chat-send-btn" onclick="sendMessage()">
+        <span style="font-size:1.1rem;">➤</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- STATUS BAR -->
+<div class="statusbar">
+  <span id="status-count">18 items</span>
+  <span id="status-sel" class="sel-count" style="display:none"></span>
+  <span class="spacer"></span>
+  <div class="status-dot"></div>
+  <span>AI Active</span>
+  <span>·</span>
+  <span id="status-view">AI Suggested</span>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"><span id="toast-icon">✓</span><span id="toast-msg">Done</span></div>
+
+<!-- CONTEXT MENU -->
+<div class="ctx-menu" id="ctx-menu">
+  <div class="ctx-item" onclick="openRename()">✏️ &nbsp;Rename</div>
+  <div class="ctx-item" onclick="copySelected()">📋 &nbsp;Copy</div>
+  <div class="ctx-item" onclick="cutSelected()">✂️ &nbsp;Cut</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="starSelected()">⭐ &nbsp;Star</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item danger" onclick="deleteSelected()">🗑️ &nbsp;Delete</div>
+</div>
+
+<div class="ctx-menu" id="ctx-bg-menu">
+  <div class="ctx-item" onclick="openNewFolder()">📂 &nbsp;New Folder</div>
+  <div class="ctx-item" onclick="runAISort()">✨ &nbsp;AI Sort</div>
+  <div class="ctx-item" onclick="selectAll()">☑️ &nbsp;Select All</div>
+</div>
+
+<!-- RENAME MODAL -->
+<div class="modal-overlay" id="modal-rename">
+  <div class="modal">
+    <div class="modal-title">Rename</div>
+    <div class="modal-sub">Enter a new name for the file or folder.</div>
+    <input class="modal-input" id="rename-input" placeholder="New name…" />
+    <div class="modal-actions">
+      <button class="mbtn mbtn-ghost" onclick="closeModal('modal-rename')">Cancel</button>
+      <button class="mbtn mbtn-primary" onclick="confirmRename()">Rename</button>
+    </div>
+  </div>
+</div>
+
+<!-- DELETE MODAL -->
+<div class="modal-overlay" id="modal-delete">
+  <div class="modal">
+    <div class="modal-title">Delete Files</div>
+    <div class="modal-sub" id="delete-msg">Are you sure you want to delete the selected files?</div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-ghost" onclick="closeModal('modal-delete')">Cancel</button>
+      <button class="mbtn mbtn-danger" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- NEW FOLDER MODAL -->
+<div class="modal-overlay" id="modal-folder">
+  <div class="modal">
+    <div class="modal-title">New Folder</div>
+    <div class="modal-sub">Enter a name for the new folder.</div>
+    <input class="modal-input" id="folder-input" placeholder="Folder name…" />
+    <div class="modal-actions">
+      <button class="mbtn mbtn-ghost" onclick="closeModal('modal-folder')">Cancel</button>
+      <button class="mbtn mbtn-primary" onclick="confirmNewFolder()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- DUPLICATES MODAL -->
+<div class="modal-overlay" id="modal-dups">
+  <div class="modal" style="width:460px;">
+    <div class="modal-title">🪞 Duplicate Files</div>
+    <div class="modal-sub">AI found these duplicate files. Remove extras to free up storage.</div>
+    <div id="dups-list" style="max-height:220px;overflow-y:auto;margin-bottom:16px;"></div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-ghost" onclick="closeModal('modal-dups')">Close</button>
+      <button class="mbtn mbtn-danger" onclick="deleteAllDups()">Delete All Duplicates</button>
+    </div>
+  </div>
+</div>
+
+<!-- COMMAND PALETTE -->
+<div class="modal-overlay" id="command-palette" onclick="if(event.target===this) closeCommandPalette()">
+  <div class="command-palette-modal">
+    <div class="cp-search-wrapper">
+      <span style="font-size:1.1rem;color:var(--muted);">🔍</span>
+      <input 
+        type="text" 
+        id="cp-input" 
+        class="cp-input" 
+        placeholder="Search files semantically or run commands..."
+        oninput="filterCommands(this.value)"
+        onkeydown="handleCPKeydown(event)"
+      />
+      <span class="cp-hint">Ctrl+K</span>
+    </div>
+    <div class="cp-results" id="cp-results">
+      <!-- Populated dynamically -->
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── Window controls → Electron IPC ──
+  function winMinimize() { window.electronAPI?.minimize(); }
+  function winMaximize() { window.electronAPI?.maximize(); }
+  function winClose()    { window.electronAPI?.close(); }
+
+  // ══ DATA ══
+  const ALL_FILES = [
+    { id:1,  name:'Q4_Report.xlsx',     icon:'📊', size:'2.4 MB',  type:'docs',    date:'Today, 9:14 AM',    tags:['ai'],    starred:false, hasPII:true, sensitivity:'Confidential', compressed:null },
+    { id:2,  name:'Brief_Nov.pdf',      icon:'📄', size:'890 KB',  type:'docs',    date:'Today, 8:00 AM',    tags:['ai'],    starred:false, hasPII:false, sensitivity:'Public', compressed:'WebP -35%' },
+    { id:3,  name:'banner_v3.png',      icon:'🖼️', size:'1.1 MB',  type:'images',  date:'Yesterday',         tags:[],        starred:false, hasPII:false, sensitivity:null, compressed:'WebP -40%' },
+    { id:4,  name:'demo_clip.mp4',      icon:'🎬', size:'48 MB',   type:'videos',  date:'Yesterday',         tags:[],        starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:5,  name:'notes.docx',         icon:'📝', size:'340 KB',  type:'docs',    date:'Mon, 10:30 AM',     tags:[],        starred:true,  hasPII:false, sensitivity:null, compressed:null },
+    { id:6,  name:'archive.zip',        icon:'📦', size:'12.3 MB', type:'archives',date:'Mon, 9:00 AM',      tags:['dup'],   starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:7,  name:'profile_photo.jpg',  icon:'🖼️', size:'3.2 MB',  type:'images',  date:'Sun, 4:00 PM',      tags:['ai'],    starred:false, hasPII:false, sensitivity:null, compressed:'WebP -42%' },
+    { id:8,  name:'Budget_2024.xlsx',   icon:'📊', size:'1.8 MB',  type:'docs',    date:'Sun, 2:00 PM',      tags:[],        starred:false, hasPII:true, sensitivity:'Internal', compressed:null },
+    { id:9,  name:'podcast_ep12.mp3',   icon:'🎵', size:'56 MB',   type:'audio',   date:'Sat',               tags:[],        starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:10, name:'archive_copy.zip',   icon:'📦', size:'12.3 MB', type:'archives',date:'Sat',               tags:['dup'],   starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:11, name:'logo_final.png',     icon:'🖼️', size:'890 KB',  type:'images',  date:'Fri',               tags:[],        starred:true,  hasPII:false, sensitivity:null, compressed:'WebP -38%' },
+    { id:12, name:'Meeting_Notes.docx', icon:'📝', size:'210 KB',  type:'docs',    date:'Fri',               tags:['ai'],    starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:13, name:'song_backup.mp3',    icon:'🎵', size:'56 MB',   type:'audio',   date:'Thu',               tags:['dup'],   starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:14, name:'Proposal_v2.pdf',    icon:'📄', size:'4.1 MB',  type:'docs',    date:'Thu',               tags:['ai'],    starred:false, hasPII:true, sensitivity:'Confidential', compressed:null },
+    { id:15, name:'screenshot_1.png',   icon:'🖼️', size:'450 KB',  type:'images',  date:'Wed',               tags:[],        starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:16, name:'backup_files.zip',   icon:'📦', size:'89 MB',   type:'archives',date:'Wed',               tags:['dup'],   starred:false, hasPII:false, sensitivity:null, compressed:null },
+    { id:17, name:'Presentation.pptx',  icon:'📊', size:'7.2 MB',  type:'docs',    date:'Tue',               tags:['ai'],    starred:false, hasPII:false, sensitivity:'Internal', compressed:null },
+    { id:18, name:'track_final.mp3',    icon:'🎵', size:'8.4 MB',  type:'audio',   date:'Tue',               tags:[],        starred:false, hasPII:false, sensitivity:null, compressed:null },
+  ];
+
+  let files       = JSON.parse(JSON.stringify(ALL_FILES));
+  let selected    = new Set();
+  let currentView = 'ai';
+  let clipboard   = null;
+  let clipMode    = null;
+  let sortMode    = 0;
+  let viewMode    = 'grid';
+  let history     = ['ai'];
+  let histIdx     = 0;
+  let activeFile  = null;
+  const SORT_LABELS = ['Name','Date','Size'];
+
+  const VIEWS = {
+    insights: { title:'📊 Storage Health', filter: null }, // Special dashboard view
+    ai:       { title:'✨ AI Suggested',  filter: f => f.tags.includes('ai') },
+    recent:   { title:'🕐 Recent',         filter: f => ['Today, 9:14 AM','Today, 8:00 AM','Yesterday'].includes(f.date) },
+    star:     { title:'⭐ Starred',        filter: f => f.starred },
+    docs:     { title:'📄 Documents',      filter: f => f.type === 'docs' },
+    images:   { title:'🖼️ Images',         filter: f => f.type === 'images' },
+    videos:   { title:'🎬 Videos',         filter: f => f.type === 'videos' },
+    audio:    { title:'🎵 Audio',          filter: f => f.type === 'audio' },
+    archives: { title:'📦 Archives',       filter: f => f.type === 'archives' },
+    desktop:  { title:'🖥️ Desktop',        filter: f => ['Q4_Report.xlsx','banner_v3.png','notes.docx'].includes(f.name) },
+    downloads:{ title:'⬇️ Downloads',      filter: f => ['archive.zip','demo_clip.mp4','podcast_ep12.mp3'].includes(f.name) },
+    mydocs:   { title:'📁 My Files',       filter: () => true },
+    dups:     { title:'🪞 Duplicates',     filter: f => f.tags.includes('dup') },
+    search:   { title:'🔍 Search Results', filter: null },
+  };
+
+  function loadView(view, pushHistory = true) {
+    currentView = view;
+    clearSelection();
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+    const navEl = document.getElementById('nav-' + view);
+    if (navEl) navEl.classList.add('active');
+    if (pushHistory) {
+      history = history.slice(0, histIdx + 1);
+      history.push(view);
+      histIdx = history.length - 1;
+    }
+    updateNavBtns();
+    renderFiles();
+  }
+
+  function renderFiles(filterFn = null) {
+    const view = VIEWS[currentView] || VIEWS.mydocs;
+    document.getElementById('view-title').textContent = view.title;
+    document.getElementById('status-view').textContent = view.title.replace(/^[^ ]+ /,'');
+    document.getElementById('titlebar-title').textContent = 'NexaFiles AI — ' + view.title.replace(/^[^ ]+ /,'');
+    
+    // Special handling for insights dashboard
+    if (currentView === 'insights') {
+      renderInsightsDashboard();
+      return;
+    }
+    
+    let subset = filterFn ? files.filter(filterFn) : files.filter(view.filter || (() => true));
+    subset = sortFiles(subset);
+    const area = document.getElementById('files-area');
+    if (subset.length === 0) {
+      area.innerHTML = `<div class="empty-state"><div class="ei">🗂️</div><div>No files here</div></div>`;
+    } else {
+      area.innerHTML = `
+        <div class="files-section-title">${subset.length} item${subset.length !== 1 ? 's' : ''}</div>
+        <div class="files-grid">${subset.map(f => fileCardHTML(f)).join('')}</div>`;
+    }
+    document.getElementById('status-count').textContent = subset.length + ' item' + (subset.length !== 1 ? 's' : '');
+    updateRibbon();
+  }
+
+  function fileCardHTML(f) {
+    const sel = selected.has(f.id);
+    const isAI  = f.tags.includes('ai');
+    const isDup = f.tags.includes('dup');
+    const cls = ['file-card', sel ? 'selected' : '', isAI ? 'ai-pick' : '', isDup ? 'dup' : ''].join(' ').trim();
+    
+    let badge = '';
+    if (isAI)  badge = `<span class="file-badge ai">AI Pick</span>`;
+    if (isDup) badge = `<span class="file-badge dup">Duplicate</span>`;
+    
+    // Generate mini badges for PII, sensitivity, compression
+    let miniBadges = '';
+    if (f.hasPII) miniBadges += `<span class="mini-badge pii">🔒 PII</span>`;
+    if (f.sensitivity) miniBadges += `<span class="mini-badge sensitive">🛡️ ${f.sensitivity}</span>`;
+    if (f.compressed) miniBadges += `<span class="mini-badge compressed">⚡ ${f.compressed}</span>`;
+    
+    return `<div class="${cls}" data-id="${f.id}"
+        onclick="selectFile(event,${f.id})" ondblclick="openFile(${f.id})" oncontextmenu="openCtx(event,${f.id})">
+      ${miniBadges ? `<div class="file-badges">${miniBadges}</div>` : ''}
+      <div class="check-box">${sel ? '✓' : ''}</div>
+      <div class="file-icon">${f.icon}</div>
+      <div class="file-name">${f.name}</div>
+      <div class="file-size">${f.size}</div>
+      ${badge}
+    </div>`;
+  }
+
+  function sortFiles(arr) {
+    return [...arr].sort((a, b) => {
+      if (sortMode === 0) return a.name.localeCompare(b.name);
+      if (sortMode === 1) return a.id - b.id;
+      if (sortMode === 2) return parseFloat(b.size) - parseFloat(a.size);
+    });
+  }
+
+  function selectFile(e, id) {
+    e.stopPropagation();
+    if (e.ctrlKey || e.metaKey) {
+      selected.has(id) ? selected.delete(id) : selected.add(id);
+    } else if (e.shiftKey && activeFile) {
+      const view = VIEWS[currentView];
+      let subset = files.filter(view.filter || (() => true));
+      const ids = subset.map(f => f.id);
+      const a = ids.indexOf(activeFile), b = ids.indexOf(id);
+      const [lo, hi] = [Math.min(a,b), Math.max(a,b)];
+      ids.slice(lo, hi+1).forEach(i => selected.add(i));
+    } else {
+      selected.clear();
+      selected.add(id);
+    }
+    activeFile = id;
+    updateRibbon();
+    renderFiles();
+    
+    // Add selection chip to chat
+    addFileSelectionChip();
+  }
+
+  function clearSelection() {
+    selected.clear(); activeFile = null;
+    updateRibbon();
+    document.getElementById('status-sel').style.display = 'none';
+  }
+
+  function selectAll() {
+    const view = VIEWS[currentView];
+    const subset = files.filter(view.filter || (() => true));
+    subset.forEach(f => selected.add(f.id));
+    renderFiles(); updateRibbon();
+    toast('☑️', `Selected ${selected.size} files`, 'info');
+  }
+
+  function updateRibbon() {
+    const hasSel = selected.size > 0;
+    ['rb-copy','rb-cut','rb-delete'].forEach(id => document.getElementById(id).disabled = !hasSel);
+    document.getElementById('rb-rename').disabled = selected.size !== 1;
+    document.getElementById('rb-paste').disabled  = !clipboard;
+    const stat = document.getElementById('status-sel');
+    if (hasSel) { stat.style.display = ''; stat.textContent = selected.size + ' selected'; }
+    else stat.style.display = 'none';
+  }
+
+  function copySelected() {
+    clipboard = [...selected]; clipMode = 'copy';
+    document.getElementById('rb-paste').disabled = false;
+    toast('📋', `Copied ${clipboard.length} file${clipboard.length > 1 ? 's' : ''}`, 'info');
+  }
+
+  function cutSelected() {
+    clipboard = [...selected]; clipMode = 'cut';
+    document.getElementById('rb-paste').disabled = false;
+    toast('✂️', `Cut ${clipboard.length} file${clipboard.length > 1 ? 's' : ''}`, 'info');
+  }
+
+  function pasteFiles() {
+    if (!clipboard) return;
+    if (clipMode === 'cut') {
+      toast('📌', `Moved ${clipboard.length} file${clipboard.length > 1 ? 's' : ''} here`, 'success');
+      clipboard = null; clipMode = null;
+      document.getElementById('rb-paste').disabled = true;
+    } else {
+      clipboard.forEach(id => {
+        const orig = files.find(f => f.id === id);
+        if (orig) {
+          const copy = { ...orig, id: Date.now() + Math.random(), name: orig.name.replace(/(\.[^.]+)?$/, ' - Copy$1') };
+          files.push(copy);
+        }
+      });
+      toast('📌', 'Pasted copies', 'success');
+      renderFiles();
+    }
+  }
+
+  function openRename() {
+    if (selected.size !== 1) return;
+    const f = files.find(f => f.id === [...selected][0]);
+    if (!f) return;
+    document.getElementById('rename-input').value = f.name;
+    openModal('modal-rename');
+    setTimeout(() => document.getElementById('rename-input').select(), 100);
+  }
+
+  function confirmRename() {
+    const val = document.getElementById('rename-input').value.trim();
+    if (!val) return;
+    const id = [...selected][0];
+    const f = files.find(f => f.id === id);
+    if (f) f.name = val;
+    closeModal('modal-rename');
+    renderFiles();
+    toast('✏️', `Renamed to "${val}"`, 'success');
+  }
+
+  function deleteSelected() {
+    if (!selected.size) return;
+    document.getElementById('delete-msg').textContent =
+      `Delete ${selected.size} item${selected.size > 1 ? 's' : ''}? This cannot be undone.`;
+    openModal('modal-delete');
+  }
+
+  function confirmDelete() {
+    const count = selected.size;
+    files = files.filter(f => !selected.has(f.id));
+    selected.clear(); activeFile = null;
+    closeModal('modal-delete');
+    renderFiles(); updateDupBadge();
+    toast('🗑️', `Deleted ${count} item${count > 1 ? 's' : ''}`, 'success');
+  }
+
+  function openNewFolder() {
+    document.getElementById('folder-input').value = '';
+    openModal('modal-folder');
+    setTimeout(() => document.getElementById('folder-input').focus(), 100);
+  }
+
+  function confirmNewFolder() {
+    const name = document.getElementById('folder-input').value.trim() || 'New Folder';
+    files.push({ id: Date.now(), name, icon: '📁', size: '—', type: 'docs', date: 'Just now', tags: [], starred: false });
+    closeModal('modal-folder');
+    renderFiles();
+    toast('📂', `Folder "${name}" created`, 'success');
+  }
+
+  function starSelected() {
+    selected.forEach(id => { const f = files.find(f => f.id === id); if (f) f.starred = !f.starred; });
+    renderFiles();
+    toast('⭐', 'Updated starred files', 'info');
+  }
+
+  function runAISort() {
+    toast('✨', 'AI sorting your files…', 'info');
+    setTimeout(() => {
+      files.sort((a, b) => {
+        const order = { docs: 0, images: 1, audio: 2, videos: 3, archives: 4 };
+        return (order[a.type] ?? 5) - (order[b.type] ?? 5);
+      });
+      renderFiles();
+      toast('✨', 'AI sort complete! Files grouped by type.', 'success');
+    }, 800);
+  }
+
+  function aiSearch(q) {
+    q = q.trim().toLowerCase();
+    if (!q) { loadView(currentView); return; }
+    const keywords = {
+      report:   f => f.name.toLowerCase().includes('report'),
+      pdf:      f => f.name.endsWith('.pdf'),
+      image:    f => f.type === 'images',
+      video:    f => f.type === 'videos',
+      audio:    f => f.type === 'audio',
+      archive:  f => f.type === 'archives',
+      large:    f => parseFloat(f.size) > 10,
+      recent:   f => f.date.includes('Today') || f.date.includes('Yesterday'),
+      starred:  f => f.starred,
+      duplicate:f => f.tags.includes('dup'),
+      excel:    f => f.name.endsWith('.xlsx'),
+      word:     f => f.name.endsWith('.docx'),
+      ai:       f => f.tags.includes('ai'),
+    };
+    let filterFn = f => f.name.toLowerCase().includes(q);
+    for (const [kw, fn] of Object.entries(keywords)) {
+      if (q.includes(kw)) { filterFn = fn; break; }
+    }
+    currentView = 'search';
+    VIEWS.search = { title: `🔍 "${q}"`, filter: filterFn };
+    document.getElementById('view-title').textContent = `🔍 "${q}"`;
+    renderFiles(filterFn);
+  }
+
+  function quickSearch(q) {
+    q = q.trim().toLowerCase();
+    if (!q) { loadView(currentView); return; }
+    renderFiles(f => f.name.toLowerCase().includes(q) || f.type.includes(q));
+  }
+
+  function focusAISearch() { document.getElementById('ai-search-input').focus(); }
+
+  function showDuplicates() {
+    const dups = files.filter(f => f.tags.includes('dup'));
+    const list = document.getElementById('dups-list');
+    if (dups.length === 0) {
+      list.innerHTML = `<div class="empty-state"><div class="ei">✅</div><div>No duplicates found!</div></div>`;
+    } else {
+      list.innerHTML = dups.map(f => `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--card);border:1px solid rgba(239,68,68,0.2);border-radius:9px;margin-bottom:8px;">
+          <span style="font-size:1.4rem;">${f.icon}</span>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:0.82rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${f.name}</div>
+            <div style="font-size:0.7rem;color:var(--muted);">${f.size} · ${f.date}</div>
+          </div>
+          <button onclick="deleteSingle(${f.id})" style="background:rgba(239,68,68,0.15);color:#ef4444;border:none;border-radius:7px;padding:5px 12px;font-size:0.75rem;cursor:pointer;">Delete</button>
+        </div>`).join('');
+    }
+    openModal('modal-dups');
+  }
+
+  function deleteSingle(id) {
+    files = files.filter(f => f.id !== id);
+    updateDupBadge(); showDuplicates(); renderFiles();
+    toast('🗑️', 'Duplicate removed', 'success');
+  }
+
+  function deleteAllDups() {
+    const count = files.filter(f => f.tags.includes('dup')).length;
+    files = files.filter(f => !f.tags.includes('dup'));
+    updateDupBadge(); closeModal('modal-dups'); renderFiles();
+    toast('✅', `Removed ${count} duplicates — space freed!`, 'success');
+  }
+
+  function updateDupBadge() {
+    const count = files.filter(f => f.tags.includes('dup')).length;
+    const badge = document.getElementById('badge-dups');
+    badge.textContent = count;
+    badge.style.display = count ? '' : 'none';
+  }
+
+  function openFile(id) { const f = files.find(f => f.id === id); if (f) toast('📂', `Opening "${f.name}"…`, 'info'); }
+
+  function openCtx(e, id) {
+    e.preventDefault(); e.stopPropagation();
+    if (!selected.has(id)) { selected.clear(); selected.add(id); activeFile = id; renderFiles(); updateRibbon(); }
+    positionMenu('ctx-menu', e.clientX, e.clientY);
+    closeCtxBg();
+  }
+
+  function openCtxBg(e) { e.preventDefault(); closeCtx(); positionMenu('ctx-bg-menu', e.clientX, e.clientY); }
+
+  function positionMenu(id, x, y) {
+    const menu = document.getElementById(id);
+    menu.classList.add('show');
+    menu.style.left = Math.min(x, window.innerWidth  - 190) + 'px';
+    menu.style.top  = Math.min(y, window.innerHeight - 200) + 'px';
+  }
+
+  function closeCtx()   { document.getElementById('ctx-menu').classList.remove('show'); }
+  function closeCtxBg() { document.getElementById('ctx-bg-menu').classList.remove('show'); }
+
+  document.addEventListener('click', () => { closeCtx(); closeCtxBg(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape')  { closeCtx(); closeCtxBg(); closeAllModals(); }
+    if (e.key === 'Delete' && selected.size) deleteSelected();
+    if (e.key === 'a' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); selectAll(); }
+    if (e.key === 'F2' && selected.size === 1) openRename();
+    if (e.key === 'c' && (e.ctrlKey || e.metaKey) && selected.size) copySelected();
+    if (e.key === 'x' && (e.ctrlKey || e.metaKey) && selected.size) cutSelected();
+    if (e.key === 'v' && (e.ctrlKey || e.metaKey) && clipboard) pasteFiles();
+  });
+
+  function goBack()    { if (histIdx > 0) { histIdx--; loadView(history[histIdx], false); updateNavBtns(); } }
+  function goForward() { if (histIdx < history.length - 1) { histIdx++; loadView(history[histIdx], false); updateNavBtns(); } }
+  function goUp()      { loadView('mydocs'); updatePathBar(['This PC', 'My Files']); }
+
+  function updateNavBtns() {
+    document.getElementById('btn-back').disabled = histIdx <= 0;
+    document.getElementById('btn-fwd').disabled  = histIdx >= history.length - 1;
+    const view = VIEWS[history[histIdx]];
+    if (view) updatePathBar(['This PC', view.title.replace(/^[^ ]+ /,'')]);
+  }
+
+  function updatePathBar(segments) {
+    document.getElementById('addr-path').innerHTML = `<span class="ni">🖥️</span>` +
+      segments.map(s => `<span class="sep">›</span><span class="seg" onclick="loadView('mydocs')">${s}</span>`).join('');
+  }
+
+  function cycleSortMode() {
+    sortMode = (sortMode + 1) % 3;
+    document.getElementById('sort-label').textContent = SORT_LABELS[sortMode];
+    renderFiles();
+    toast('⇅', `Sorted by ${SORT_LABELS[sortMode]}`, 'info');
+  }
+
+  function cycleViewMode() {
+    viewMode = viewMode === 'grid' ? 'list' : 'grid';
+    document.getElementById('view-icon').textContent = viewMode === 'grid' ? '⊞' : '☰';
+    toast(viewMode === 'grid' ? '⊞' : '☰', `Switched to ${viewMode} view`, 'info');
+  }
+
+  function openModal(id)  { document.getElementById(id).classList.add('show'); }
+  function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+  function closeAllModals() { document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('show')); }
+
+  document.querySelectorAll('.modal-overlay').forEach(ov => {
+    ov.addEventListener('click', e => { if (e.target === ov) ov.classList.remove('show'); });
+  });
+  document.getElementById('rename-input').addEventListener('keydown', e => { if (e.key === 'Enter') confirmRename(); });
+  document.getElementById('folder-input').addEventListener('keydown', e => { if (e.key === 'Enter') confirmNewFolder(); });
+
+  let toastTimer;
+  function toast(icon, msg, type = '') {
+    const el = document.getElementById('toast');
+    document.getElementById('toast-icon').textContent = icon;
+    document.getElementById('toast-msg').textContent  = msg;
+    el.className = `toast ${type} show`;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3500);
+  }
+
+  updatePathBar(['This PC', 'AI Suggested']);
+  loadView('ai');
+  updateDupBadge();
+
+  // ══ FILE SYSTEM ACCESS ══
+  let currentDirectory = null;
+  let realFiles = [];
+
+  async function browseFiles() {
+    if (!window.electronAPI) {
+      toast('⚠️', 'File browsing only available in desktop app', 'error');
+      return;
+    }
+    
+    try {
+      const dirPath = await window.electronAPI.selectDirectory();
+      if (!dirPath) return;
+      
+      currentDirectory = dirPath;
+      toast('📂', 'Loading files...', 'info');
+      
+      const fileList = await window.electronAPI.readDirectory(dirPath);
+      
+      // Convert real files to app format
+      realFiles = fileList.map((f, idx) => {
+        const ext = f.extension;
+        let type = 'docs', icon = '📄';
+        
+        if (['.jpg','.jpeg','.png','.gif','.webp','.svg'].includes(ext)) { type = 'images'; icon = '🖼️'; }
+        else if (['.mp4','.avi','.mov','.mkv'].includes(ext)) { type = 'videos'; icon = '🎬'; }
+        else if (['.mp3','.wav','.flac','.m4a'].includes(ext)) { type = 'audio'; icon = '🎵'; }
+        else if (['.zip','.rar','.7z','.tar','.gz'].includes(ext)) { type = 'archives'; icon = '📦'; }
+        else if (['.xlsx','.xls'].includes(ext)) { icon = '📊'; }
+        else if (['.docx','.doc'].includes(ext)) { icon = '📝'; }
+        else if (['.pdf'].includes(ext)) { icon = '📄'; }
+        
+        const sizeKB = f.size / 1024;
+        const sizeMB = sizeKB / 1024;
+        const sizeStr = sizeMB > 1 ? `${sizeMB.toFixed(1)} MB` : `${sizeKB.toFixed(0)} KB`;
+        
+        return {
+          id: Date.now() + idx,
+          name: f.name,
+          path: f.path,
+          icon,
+          size: sizeStr,
+          type,
+          date: new Date(f.modified).toLocaleDateString(),
+          tags: [],
+          starred: false,
+          hasPII: Math.random() > 0.8, // Simulate AI detection
+          sensitivity: Math.random() > 0.7 ? ['Confidential','Internal','Public'][Math.floor(Math.random()*3)] : null,
+          compressed: type === 'images' && Math.random() > 0.5 ? `WebP -${Math.floor(Math.random()*20+30)}%` : null
+        };
+      });
+      
+      files = [...realFiles];
+      loadView('mydocs');
+      toast('✅', `Loaded ${files.length} files from directory`, 'success');
+    } catch (error) {
+      console.error('Error browsing files:', error);
+      toast('❌', 'Failed to load directory', 'error');
+    }
+  }
+
+  // ══ DROP ZONE ══
+  function handleDragOver(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    document.getElementById('drop-zone').classList.add('drag-over');
+  }
+
+  function handleDragLeave(e) {
+    e.preventDefault();
+    document.getElementById('drop-zone').classList.remove('drag-over');
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    document.getElementById('drop-zone').classList.remove('drag-over');
+    
+    toast('✨', 'Auto-segregating files by type...', 'info');
+    
+    setTimeout(() => {
+      runAISort();
+      toast('✅', 'Files auto-segregated successfully!', 'success');
+    }, 1500);
+  }
+
+  // ══ COMMAND PALETTE ══
+  let cpSelected = 0;
+  const commands = [
+    { id: 'ai-suggest', icon: '✨', title: 'AI Suggested Files', subtitle: 'Files you'll likely need today', action: () => loadView('ai') },
+    { id: 'recent', icon: '🕐', title: 'Recent Files', subtitle: 'Files accessed today', action: () => loadView('recent') },
+    { id: 'duplicates', icon: '🪞', title: 'Find Duplicates', subtitle: 'Remove duplicate files', action: showDuplicates },
+    { id: 'organize', icon: '🎯', title: 'Auto-Organize', subtitle: 'Sort files by type', action: runAISort },
+    { id: 'large', icon: '📊', title: 'Large Files', subtitle: 'Sort by size descending', action: () => { sortMode = 2; renderFiles(); } },
+    { id: 'insights', icon: '💎', title: 'Storage Health', subtitle: 'View AI insights and savings', action: () => loadView('insights') },
+    { id: 'docs', icon: '📄', title: 'Documents', subtitle: 'All document files', action: () => loadView('docs') },
+    { id: 'images', icon: '🖼️', title: 'Images', subtitle: 'All image files', action: () => loadView('images') },
+    { id: 'videos', icon: '🎬', title: 'Videos', subtitle: 'All video files', action: () => loadView('videos') },
+    { id: 'audio', icon: '🎵', title: 'Audio', subtitle: 'All audio files', action: () => loadView('audio') },
+  ];
+
+  function openCommandPalette() {
+    document.getElementById('command-palette').classList.add('show');
+    cpSelected = 0;
+    renderCPResults('');
+    setTimeout(() => document.getElementById('cp-input').focus(), 100);
+  }
+
+  function closeCommandPalette() {
+    document.getElementById('command-palette').classList.remove('show');
+    document.getElementById('cp-input').value = '';
+  }
+
+  function filterCommands(query) {
+    cpSelected = 0;
+    renderCPResults(query);
+  }
+
+  function renderCPResults(query) {
+    const lower = query.toLowerCase();
+    let results = commands;
+    
+    // Filter commands
+    if (query) {
+      results = commands.filter(cmd => 
+        cmd.title.toLowerCase().includes(lower) || 
+        cmd.subtitle.toLowerCase().includes(lower)
+      );
+    }
+    
+    // Add matching files
+    const matchingFiles = files.filter(f => 
+      f.name.toLowerCase().includes(lower)
+    ).slice(0, 5);
+    
+    const resultsDiv = document.getElementById('cp-results');
+    let html = '';
+    
+    if (results.length > 0) {
+      html += `<div class="cp-category">Commands</div>`;
+      results.forEach((cmd, idx) => {
+        html += `
+          <div class="cp-item ${idx === cpSelected ? 'selected' : ''}" onclick="executeCPCommand(${idx})">
+            <div class="cp-icon">${cmd.icon}</div>
+            <div class="cp-content">
+              <div class="cp-title">${cmd.title}</div>
+              <div class="cp-subtitle">${cmd.subtitle}</div>
+            </div>
+          </div>`;
+      });
+    }
+    
+    if (matchingFiles.length > 0) {
+      html += `<div class="cp-category">Files</div>`;
+      matchingFiles.forEach((f, idx) => {
+        const globalIdx = results.length + idx;
+        html += `
+          <div class="cp-item ${globalIdx === cpSelected ? 'selected' : ''}" onclick="selectFileFromCP(${f.id})">
+            <div class="cp-icon">${f.icon}</div>
+            <div class="cp-content">
+              <div class="cp-title">${f.name}</div>
+              <div class="cp-meta">
+                <span>${f.size}</span>
+                <span>•</span>
+                <span>${f.date}</span>
+              </div>
+            </div>
+          </div>`;
+      });
+    }
+    
+    if (html === '') {
+      html = `<div class="empty-state" style="padding:40px 20px;"><div class="ei">🔍</div><div>No results found</div></div>`;
+    }
+    
+    resultsDiv.innerHTML = html;
+  }
+
+  function handleCPKeydown(e) {
+    if (e.key === 'Escape') {
+      closeCommandPalette();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      cpSelected = Math.min(cpSelected + 1, commands.length - 1);
+      renderCPResults(document.getElementById('cp-input').value);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      cpSelected = Math.max(cpSelected - 1, 0);
+      renderCPResults(document.getElementById('cp-input').value);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      executeCPCommand(cpSelected);
+    }
+  }
+
+  function executeCPCommand(idx) {
+    if (commands[idx]) {
+      commands[idx].action();
+      closeCommandPalette();
+    }
+  }
+
+  function selectFileFromCP(fileId) {
+    selected.clear();
+    selected.add(fileId);
+    activeFile = fileId;
+    closeCommandPalette();
+    renderFiles();
+    updateRibbon();
+    addFileSelectionChip();
+  }
+
+  // Global keyboard shortcut
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      e.preventDefault();
+      openCommandPalette();
+    }
+  });
+
+  // ══ INSIGHTS DASHBOARD ══
+  function renderInsightsDashboard() {
+    const area = document.getElementById('files-area');
+    
+    const totalSize = files.reduce((sum, f) => sum + parseFloat(f.size), 0);
+    const compressed = files.filter(f => f.compressed).length;
+    const hasPII = files.filter(f => f.hasPII).length;
+    const duplicates = files.filter(f => f.tags.includes('dup')).length;
+    const spaceSaved = 2.4; // GB
+    
+    area.innerHTML = `
+      <div class="dashboard-grid">
+        <div class="dashboard-card">
+          <div class="dc-header">
+            <div class="dc-title">Space Saved</div>
+            <div class="dc-icon">💾</div>
+          </div>
+          <div class="dc-value">${spaceSaved.toFixed(1)} GB</div>
+          <div class="dc-label">Through AI compression</div>
+          <div class="dc-progress">
+            <div class="dc-progress-bar" style="width: 75%;"></div>
+          </div>
+        </div>
+        
+        <div class="dashboard-card">
+          <div class="dc-header">
+            <div class="dc-title">Files Scanned</div>
+            <div class="dc-icon">🔍</div>
+          </div>
+          <div class="dc-value">${files.length}</div>
+          <div class="dc-label">${compressed} compressed, ${duplicates} duplicates</div>
+        </div>
+        
+        <div class="dashboard-card">
+          <div class="dc-header">
+            <div class="dc-title">Security Alerts</div>
+            <div class="dc-icon">🛡️</div>
+          </div>
+          <div class="dc-value">${hasPII}</div>
+          <div class="dc-label">Files with PII detected</div>
+          <div class="dc-list">
+            ${files.filter(f => f.hasPII).slice(0, 3).map(f => `
+              <div class="dc-list-item">
+                <span class="dc-list-label">${f.icon} ${f.name}</span>
+                <span class="dc-list-value">🔒 PII</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        
+        <div class="dashboard-card">
+          <div class="dc-header">
+            <div class="dc-title">ROI Summary</div>
+            <div class="dc-icon">💰</div>
+          </div>
+          <div class="dc-value">$89</div>
+          <div class="dc-label">Estimated monthly savings</div>
+          <div class="dc-list">
+            <div class="dc-list-item">
+              <span class="dc-list-label">Storage costs</span>
+              <span class="dc-list-value" style="color:#34d399;">-$45</span>
+            </div>
+            <div class="dc-list-item">
+              <span class="dc-list-label">Time saved</span>
+              <span class="dc-list-value" style="color:#34d399;">-$44</span>
+            </div>
+          </div>
+        </div>
+        
+        <div class="dashboard-card">
+          <div class="dc-header">
+            <div class="dc-title">Compression Stats</div>
+            <div class="dc-icon">⚡</div>
+          </div>
+          <div class="dc-value">${compressed}</div>
+          <div class="dc-label">Files optimized with WebP</div>
+          <div class="dc-list">
+            ${files.filter(f => f.compressed).slice(0, 3).map(f => `
+              <div class="dc-list-item">
+                <span class="dc-list-label">${f.icon} ${f.name}</span>
+                <span class="dc-list-value" style="color:#34d399;">${f.compressed}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        
+        <div class="dashboard-card">
+          <div class="dc-header">
+            <div class="dc-title">Sensitivity Labels</div>
+            <div class="dc-icon">🏷️</div>
+          </div>
+          <div class="dc-list" style="margin-top:0;">
+            <div class="dc-list-item">
+              <span class="dc-list-label">Confidential</span>
+              <span class="dc-list-value">${files.filter(f => f.sensitivity === 'Confidential').length}</span>
+            </div>
+            <div class="dc-list-item">
+              <span class="dc-list-label">Internal</span>
+              <span class="dc-list-value">${files.filter(f => f.sensitivity === 'Internal').length}</span>
+            </div>
+            <div class="dc-list-item">
+              <span class="dc-list-label">Public</span>
+              <span class="dc-list-value">${files.filter(f => f.sensitivity === 'Public').length}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    
+    document.getElementById('status-count').textContent = 'Dashboard View';
+  }
+
+  // ══ CONTEXTUAL AI CHATBOT ══
+  function addFileSelectionChip() {
+    if (selected.size === 0) return;
+    
+    const selectedFiles = Array.from(selected).map(id => files.find(f => f.id === id));
+    
+    if (selected.size === 1) {
+      const f = selectedFiles[0];
+      addChatBubble(`
+        <div class="file-chip">
+          <span class="fc-icon">${f.icon}</span>
+          <span class="fc-name">${f.name}</span>
+        </div>
+      `, 'ai-chip');
+      
+      // Add contextual quick actions
+      setTimeout(() => {
+        addChatBubble('What would you like to do with this file?', 'ai');
+        
+        // Add action buttons
+        const messagesDiv = document.getElementById('chat-messages');
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'quick-actions';
+        actionsDiv.style.marginTop = '8px';
+        actionsDiv.innerHTML = `
+          <div class="quick-action-btn" onclick="sendQuickPrompt('Summarize this file')">
+            <span class="qa-icon">📝</span>
+            <span class="qa-text">Summarize</span>
+          </div>
+          <div class="quick-action-btn" onclick="sendQuickPrompt('Find similar files')">
+            <span class="qa-icon">🔍</span>
+            <span class="qa-text">Find similar</span>
+          </div>
+          <div class="quick-action-btn" onclick="starSelected()">
+            <span class="qa-icon">⭐</span>
+            <span class="qa-text">Star it</span>
+          </div>
+          <div class="quick-action-btn" onclick="openRename()">
+            <span class="qa-icon">✏️</span>
+            <span class="qa-text">Rename</span>
+          </div>
+        `;
+        messagesDiv.appendChild(actionsDiv);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      }, 300);
+      
+    } else {
+      addChatBubble(`
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          ${selectedFiles.slice(0, 3).map(f => `
+            <div class="file-chip">
+              <span class="fc-icon">${f.icon}</span>
+              <span class="fc-name">${f.name}</span>
+            </div>
+          `).join('')}
+          ${selected.size > 3 ? `<div style="font-size:0.75rem;color:var(--muted);margin-top:4px;">+${selected.size - 3} more</div>` : ''}
+        </div>
+      `, 'ai-chip');
+      
+      setTimeout(() => {
+        addChatBubble(`I've selected ${selected.size} files. Want me to generate one consolidated summary for all of them?`, 'ai');
+      }, 300);
+    }
+  }
+
+  // ══ AI CHATBOT FUNCTIONALITY ══
+  function sendMessage() {
+    const input = document.getElementById('chat-input');
+    const message = input.value.trim();
+    if (!message) return;
+
+    addChatBubble(message, 'user');
+    input.value = '';
+
+    showTypingIndicator();
+
+    setTimeout(() => {
+      hideTypingIndicator();
+      const response = generateAIResponse(message);
+      addChatBubble(response.text, 'ai');
+      
+      if (response.action) {
+        setTimeout(response.action, 300);
+      }
+    }, 800 + Math.random() * 600);
+  }
+
+  function sendQuickPrompt(prompt) {
+    document.getElementById('chat-input').value = prompt;
+    sendMessage();
+  }
+
+  function addChatBubble(text, type) {
+    const messagesDiv = document.getElementById('chat-messages');
+    
+    // Special handling for chip type
+    if (type === 'ai-chip') {
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble ai';
+      bubble.innerHTML = `
+        <div class="chat-avatar">✨</div>
+        <div class="chat-content">${text}</div>
+      `;
+      messagesDiv.appendChild(bubble);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      return;
+    }
+    
+    const bubble = document.createElement('div');
+    bubble.className = `chat-bubble ${type}`;
+    
+    const avatar = type === 'ai' ? '✨' : '👤';
+    const time = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    
+    bubble.innerHTML = `
+      <div class="chat-avatar">${avatar}</div>
+      <div class="chat-content">
+        <div class="chat-text">${text}</div>
+        <div class="chat-time">${time}</div>
+      </div>
+    `;
+    
+    messagesDiv.appendChild(bubble);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  }
+
+  function showTypingIndicator() {
+    const messagesDiv = document.getElementById('chat-messages');
+    const indicator = document.createElement('div');
+    indicator.className = 'chat-bubble ai';
+    indicator.id = 'typing-indicator';
+    indicator.innerHTML = `
+      <div class="chat-avatar">✨</div>
+      <div class="chat-content">
+        <div class="chat-text">
+          <div class="typing-indicator">
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+          </div>
+        </div>
+      </div>
+    `;
+    messagesDiv.appendChild(indicator);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  }
+
+  function hideTypingIndicator() {
+    const indicator = document.getElementById('typing-indicator');
+    if (indicator) indicator.remove();
+  }
+
+  function generateAIResponse(message) {
+    const lower = message.toLowerCase();
+    
+    // Duplicates
+    if (lower.includes('duplicate') || lower.includes('dupes')) {
+      const dupCount = files.filter(f => f.tags.includes('dup')).length;
+      return {
+        text: `I found ${dupCount} duplicate files taking up ~18 MB. Would you like me to show them?`,
+        action: () => showDuplicates()
+      };
+    }
+    
+    // Large files
+    if (lower.includes('large') || lower.includes('big') || lower.includes('size')) {
+      const largeFiles = files.filter(f => parseFloat(f.size) > 10).length;
+      return {
+        text: `I found ${largeFiles} files larger than 10 MB. Sorting by size now...`,
+        action: () => { sortMode = 2; document.getElementById('sort-label').textContent = 'Size'; renderFiles(); }
+      };
+    }
+    
+    // Organize/Sort
+    if (lower.includes('organize') || lower.includes('sort') || lower.includes('clean')) {
+      return {
+        text: `I'll organize your files by type right now. This groups documents, images, videos, and more.`,
+        action: () => runAISort()
+      };
+    }
+    
+    // Recent work
+    if (lower.includes('recent') || lower.includes('today') || lower.includes('work')) {
+      const recentCount = files.filter(f => f.date.includes('Today') || f.date.includes('Yesterday')).length;
+      return {
+        text: `You worked on ${recentCount} files recently. Let me show you the Recent view.`,
+        action: () => loadView('recent')
+      };
+    }
+    
+    // AI suggestions
+    if (lower.includes('suggest') || lower.includes('recommend') || lower.includes('ai pick')) {
+      const aiCount = files.filter(f => f.tags.includes('ai')).length;
+      return {
+        text: `I've picked ${aiCount} files you'll likely need today based on your patterns. Opening AI Suggested view...`,
+        action: () => loadView('ai')
+      };
+    }
+    
+    // Images
+    if (lower.includes('image') || lower.includes('photo') || lower.includes('picture')) {
+      const imgCount = files.filter(f => f.type === 'images').length;
+      return {
+        text: `You have ${imgCount} images. Taking you there now!`,
+        action: () => loadView('images')
+      };
+    }
+    
+    // Videos
+    if (lower.includes('video') || lower.includes('movie')) {
+      const vidCount = files.filter(f => f.type === 'videos').length;
+      return {
+        text: `Found ${vidCount} videos in your collection. Opening Videos...`,
+        action: () => loadView('videos')
+      };
+    }
+    
+    // Documents
+    if (lower.includes('document') || lower.includes('doc') || lower.includes('pdf') || lower.includes('excel')) {
+      const docCount = files.filter(f => f.type === 'docs').length;
+      return {
+        text: `You have ${docCount} documents. Switching to Documents view...`,
+        action: () => loadView('docs')
+      };
+    }
+    
+    // Search
+    if (lower.includes('find') || lower.includes('search') || lower.includes('look for')) {
+      const searchTerm = message.replace(/find|search|look for/gi, '').trim();
+      if (searchTerm) {
+        return {
+          text: `Searching for "${searchTerm}"...`,
+          action: () => aiSearch(searchTerm)
+        };
+      }
+    }
+    
+    // Insights / Storage Health
+    if (lower.includes('insight') || lower.includes('storage') || lower.includes('health') || lower.includes('savings')) {
+      return {
+        text: `Opening your Storage Health dashboard. I'll show you AI savings, security alerts, and ROI metrics.`,
+        action: () => loadView('insights')
+      };
+    }
+    
+    // Help/capabilities
+    if (lower.includes('help') || lower.includes('can you') || lower.includes('what can')) {
+      return {
+        text: `I can help you:\n• Find and remove duplicates\n• Organize files by type\n• Show large files\n• Search for specific files\n• Suggest files you need\n• Navigate to different views\n• Show storage insights & ROI\n• Detect PII and sensitive data\n\nJust ask me naturally!`
+      };
+    }
+    
+    // Starred files
+    if (lower.includes('star') || lower.includes('favorite')) {
+      const starCount = files.filter(f => f.starred).length;
+      return {
+        text: `You have ${starCount} starred files. Opening Starred view...`,
+        action: () => loadView('star')
+      };
+    }
+    
+    // PII / Security
+    if (lower.includes('pii') || lower.includes('sensitive') || lower.includes('security')) {
+      const piiCount = files.filter(f => f.hasPII).length;
+      return {
+        text: `I detected ${piiCount} files with potential PII (credit cards, SSNs). Check Storage Health for details.`,
+        action: () => loadView('insights')
+      };
+    }
+    
+    // Summarize / selected file
+    if (lower.includes('summarize') && activeFile) {
+      const f = files.find(f => f.id === activeFile);
+      return {
+        text: `I would summarize ${f.name} here. In the real app, this would use AI to extract key information from the file contents.`
+      };
+    }
+    
+    // Default response
+    return {
+      text: `I can help with that! Try asking me to "find duplicates", "organize files", "show large files", "storage insights", or "what did I work on today?"`
+    };
+  }
+</script>
+</body>
+</html>
