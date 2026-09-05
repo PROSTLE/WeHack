@@ -20,16 +20,49 @@ const AI_SERVER_URL = 'http://127.0.0.1:5050';
 // ── Start the Python AI (Flask + sklearn + Gemini) server ──
 function startAIServer() {
   const projectRoot = __dirname;
-  const venvPython = path.join(projectRoot, 'ai', 'venv', 'bin', 'python3');
-  const serverScript = path.join(projectRoot, 'ai', 'classify_server.py');
+  const aiDir = path.join(projectRoot, 'ai');
+  const serverScript = path.join(aiDir, 'classify_server.py');
 
-  // Pass Gemini API key from env or config.js to child process
-  const env = { ...process.env };
-  if (appConfig.GEMINI_API_KEY && appConfig.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY_HERE') {
-    env.GEMINI_API_KEY = appConfig.GEMINI_API_KEY;
+  // Cross-platform venv python path
+  const isWin = process.platform === 'win32';
+  const venvPython = isWin
+    ? path.join(aiDir, 'venv', 'Scripts', 'python.exe')
+    : path.join(aiDir, 'venv', 'bin', 'python3');
+
+  // Determine which python to use
+  let pythonCmd = venvPython;
+  if (!fsSync.existsSync(venvPython)) {
+    console.log('[AI Server] venv not found, attempting to create it...');
+    try {
+      const sysPython = isWin ? 'python' : 'python3';
+      // Create venv
+      execSync(`${sysPython} -m venv "${path.join(aiDir, 'venv')}"`, { cwd: aiDir, stdio: 'inherit' });
+      // Install requirements
+      const pip = isWin
+        ? path.join(aiDir, 'venv', 'Scripts', 'pip.exe')
+        : path.join(aiDir, 'venv', 'bin', 'pip');
+      const reqFile = path.join(aiDir, 'requirements.txt');
+      if (fsSync.existsSync(reqFile)) {
+        execSync(`"${pip}" install -r "${reqFile}"`, { cwd: aiDir, stdio: 'inherit' });
+      }
+      pythonCmd = venvPython;
+    } catch (setupErr) {
+      console.error('[AI Server] Auto-setup failed:', setupErr.message);
+      console.log('[AI Server] Falling back to system python');
+      pythonCmd = isWin ? 'python' : 'python3';
+    }
   }
 
-  aiServerProcess = spawn(venvPython, [serverScript], {
+  // Pass Gemini API key(s) from config.js to child process (supports key rotation)
+  const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
+  const keys = appConfig.GEMINI_API_KEYS || (appConfig.GEMINI_API_KEY ? [appConfig.GEMINI_API_KEY] : []);
+  const validKeys = keys.filter(k => k && k !== 'YOUR_GEMINI_API_KEY_HERE' && !k.startsWith('PASTE_'));
+  if (validKeys.length > 0) {
+    env.GEMINI_API_KEYS = validKeys.join(',');
+    env.GEMINI_API_KEY = validKeys[0]; // legacy fallback
+  }
+
+  aiServerProcess = spawn(pythonCmd, [serverScript], {
     cwd: projectRoot,
     env,
     stdio: ['ignore', 'pipe', 'pipe']
