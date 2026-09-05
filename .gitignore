@@ -17,3 +17,17 @@ test/tools/*.png
 # The transcripts they produced are committed in test/wake.test.js, which is
 # what the suite actually asserts against, so the audio itself need not be.
 test/fixtures/wake/
+
+# Reference projects consulted while building the describe-to-find and cloud
+# features. Deliberately NOT committed, for two reasons:
+#
+#   1. file-brain-main is GPLv3 and NexaFiles is MIT. Committing its source into
+#      this repository would put GPL-licensed code in an MIT tree. The
+#      architectural ideas taken from it were reimplemented from scratch; no
+#      file was copied, which is what keeps NexaFiles MIT.
+#   2. It is 20 MB of somebody else's source and belongs in neither the history
+#      nor a release.
+#
+# What was taken from them, and what was deliberately left, is recorded in
+# FEATURES_ADDED.txt.
+addon/

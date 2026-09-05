@@ -18,6 +18,8 @@ const { listProcesses } = require('../system/processes');
 const { classifyMagic } = require('../classify/rules');
 const converter = require('../convert');
 const contentIndex = require('../search/content-index');
+const tagSearch = require('../search/tag-search');
+const browse = require('../fs/browse');
 
 const NO_SCAN = {
   scanned: false,
@@ -290,6 +292,115 @@ function build(state, { app, nativeImage, onStage = null }) {
         contentIsUntrustedData: true,
         matches: found.matches,
         note: found.note,
+      };
+    },
+
+    /**
+     * Finds a file from a description of what is in it.
+     *
+     * This is the one search that can answer "the photo of the brown dog on
+     * grass" for a file called IMG_4821.JPG. It works only over files that have
+     * been described first — see src/main/classify/llm-tags.js — and says so
+     * plainly when the index is empty, because "no matches" and "nothing has
+     * been described" are answers a user must be able to tell apart.
+     *
+     * The model expanding the query emits words, never a query. The matching
+     * expression is built in tag-search.js from those words.
+     */
+    async find_files_by_description({ description, kind, limit } = {}) {
+      const text = String(description || '').trim();
+      if (!text) return { error: 'Searching by description needs a description.' };
+
+      stage('describing', { message: 'Matching your description…' });
+
+      const out = await tagSearch.findByDescription(state.index, text, {
+        gemini: state.gemini,
+        limit: Math.min(Math.max(1, limit || 12), 40),
+        kind: ['image', 'document', 'code'].includes(kind) ? kind : null,
+        exists: (p) => { try { return require('fs').existsSync(p); } catch { return false; } },
+      });
+
+      // Held for the same reason content matches are: if the model goes on to
+      // ask which one the user meant, the list can show the tags that put each
+      // file on it rather than asking for the choice to be made on trust.
+      state.lastDescriptionMatches = new Map(
+        out.results.map((r) => [roots.normalize(r.path), r]));
+
+      return {
+        query: out.query,
+        searchedTerms: out.terms,
+        kind: out.kind,
+        expandedBy: out.expandedBy,
+        filesDescribed: out.indexed.described,
+        matchCount: out.results.length,
+        // Every tag below was written by a model that was shown the file. It is
+        // a description, not a measurement, and must be attributed that way.
+        tagsAreModelWritten: true,
+        matches: out.results.map((r) => ({
+          path: r.path, name: r.name, kind: r.kind, bytes: r.size,
+          matchedTerms: r.matched, tags: r.tags.slice(0, 20),
+          describedBy: r.describedBy,
+        })),
+        coverage: out.indexed.described
+          ? `${out.indexed.described} file(s) have been described. Anything not ` +
+            `described cannot appear here, however well it matches.`
+          : 'No files have been described yet.',
+        note: out.note,
+      };
+    },
+
+    /**
+     * Opens a file with whatever the system associates with it.
+     *
+     * The one tool here that does something outside NexaFiles, so it is fenced
+     * accordingly. The path must be inside a root the user approved and must
+     * exist. A folder is refused — it is not this tool's job to navigate. An
+     * executable is refused outright rather than confirmed: the rest of the
+     * application asks about running a program in a system dialog the user can
+     * see and the renderer cannot forge, and a sentence in a chat window is not
+     * that. "Open the report" is a reasonable thing to say to an assistant;
+     * "run this installer" is not something it should be able to act on.
+     */
+    async open_file({ path: filePath } = {}) {
+      const raw = String(filePath || '').trim();
+      if (!raw) return { error: 'Opening a file needs a path.' };
+
+      let safe;
+      try {
+        safe = roots.assertInsideRoot(raw, { mustExist: true });
+      } catch (e) {
+        return { opened: false, error: e.message };
+      }
+
+      let st;
+      try { st = await fsp.stat(safe); } catch (e) {
+        return { opened: false, error: `That file could not be read: ${e.message}` };
+      }
+      if (st.isDirectory()) {
+        return {
+          opened: false,
+          error: 'That is a folder. Say which file inside it to open, or open it ' +
+                 'in the Files view.',
+        };
+      }
+      if (browse.isExecutable(safe)) {
+        return {
+          opened: false,
+          error: `${path.basename(safe)} is a program, and NexaFiles will not run a ` +
+                 'program on the assistant\'s say-so. Open it from the Files view if ' +
+                 'that is really what you want — it will ask you there.',
+        };
+      }
+
+      stage('opening', { message: `Opening ${path.basename(safe)}…` });
+      const failure = await require('electron').shell.openPath(safe);
+      if (failure) return { opened: false, path: safe, error: failure };
+      return {
+        opened: true,
+        path: safe,
+        name: path.basename(safe),
+        note: `${path.basename(safe)} was opened in whatever application Windows ` +
+              'associates with it.',
       };
     },
 

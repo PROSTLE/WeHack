@@ -9,7 +9,7 @@
 //   - No API keys loaded from a file in the repository.
 
 const path = require('path');
-const { app, BrowserWindow, Menu, shell, session, nativeImage, dialog, nativeTheme, systemPreferences, protocol } = require('electron');
+const { app, BrowserWindow, Menu, shell, session, nativeImage, dialog, nativeTheme, systemPreferences, protocol, safeStorage } = require('electron');
 
 const roots = require('./src/main/security/roots');
 const { AppState } = require('./src/main/app-state');
@@ -248,6 +248,10 @@ app.whenReady().then(async () => {
   state = new AppState({
     userDataDir: app.getPath('userData'),
     trashItem: (p) => shell.trashItem(p),
+    // The operating system's own credential store, for cloud refresh tokens.
+    // Passed in rather than imported inside AppState so that class stays
+    // constructible outside Electron, which is how its tests run it.
+    safeStorage,
   });
   await state.init();
 

@@ -13,6 +13,10 @@ const os = require('os');
 
 const { ipcMain, dialog, shell, app, nativeImage, nativeTheme, screen, powerMonitor } = require('electron');
 const roots = require('../security/roots');
+const cloudFs = require('../fs/cloud');
+const cloudOauth = require('../cloud/oauth');
+const cloudClient = require('../cloud/client');
+const cloudProviders = require('../cloud/providers');
 const { Plan, CATEGORY, ACTION, CONFIDENCE } = require('../safety/plan');
 const { safeMove, uniqueDestination, measure, copyPath } = require('../safety/fsops');
 const { classifyPath, classifyMagic } = require('../classify/rules');
@@ -22,6 +26,9 @@ const converter = require('../convert');
 const voice = require('../llm/voice');
 const duplicates = require('../scanners/duplicates');
 const contentDupes = require('../scanners/content-dupes');
+const tagIndexer = require('../search/tag-indexer');
+const tagSearch = require('../search/tag-search');
+const llmTags = require('../classify/llm-tags');
 const { findLeftovers, leftoversToPlanEntries } = require('../scanners/leftovers');
 const { listStartupItems } = require('../scanners/startup');
 const startupControl = require('../system/startup-control');
@@ -104,6 +111,43 @@ function register(state, mainWindow) {
     return true;
   });
   handle('roots:setProtected', async (list) => state.saveProtectedPaths(list || []));
+
+  /**
+   * The cloud sync folders on this machine, with what the last scan knows
+   * about them.
+   *
+   * Local knowledge only: this finds folders, it does not sign in anywhere and
+   * contacts nothing. A folder that has never been scanned is still listed —
+   * NexaFiles can see it exists without having measured it, and saying so is
+   * better than pretending it is not there.
+   */
+  handle('locations:cloud', async () => {
+    let providers = [];
+    try { providers = await cloudFs.detectProviders(); } catch { /* none detectable */ }
+    const scan = state.currentScan();
+    const summary = scan ? state.index.cloudSummary(scan.id) : null;
+    const byProvider = new Map(
+      (summary?.providers || []).map((p) => [p.provider, p]));
+
+    return {
+      roots: providers.map((p) => {
+        const measured = byProvider.get(p.provider) || null;
+        return {
+          provider: p.provider,
+          label: p.label,
+          path: p.path,
+          measured: measured ? {
+            files: measured.files,
+            logicalBytes: measured.logicalBytes,
+            physicalBytes: measured.physicalBytes,
+            placeholders: measured.placeholders,
+            placeholderBytes: measured.placeholderBytes,
+          } : null,
+        };
+      }),
+      scanned: !!scan,
+    };
+  });
 
   handle('locations:drives', async () => drives.listDrives());
   handle('locations:folders', async () => drives.specialFolders());
@@ -832,6 +876,323 @@ function register(state, mainWindow) {
     return { ...out, cancelled };
   });
 
+  // ── describing files, and finding them by description ────────────────────
+  //
+  // The only feature in NexaFiles that sends the contents of a user's files to
+  // anyone. Every handler below refuses to do anything until the setting is on,
+  // and the refusal names the setting rather than failing vaguely — a feature
+  // that is off should say so, not look broken.
+
+  const describeEnabled = () => !!state.settings.values.describe.enabled;
+  const requireDescribeOn = () => {
+    if (describeEnabled()) return;
+    const err = new Error(
+      'Describing files is switched off. Turn it on in Settings › Assistant — ' +
+      'it is off by default because describing a file sends that file to Google.');
+    err.code = 'DESCRIBE_OFF';
+    throw err;
+  };
+
+  handle('describe:status', async () => {
+    const scan = state.currentScan();
+    return {
+      enabled: describeEnabled(),
+      hasKey: state.gemini.available,
+      model: state.gemini.model,
+      running: !!state.taggingRun,
+      indexed: state.index.tagIndexStats(),
+      settings: { ...state.settings.values.describe },
+      scanRoot: scan?.root || null,
+      // What is worth describing at all, so the view can say "1,240 images
+      // found" before the user spends anything.
+      kinds: {
+        image: [...llmTags.IMAGE_EXTS],
+        document: [...llmTags.DOC_EXTS],
+        code: [...llmTags.CODE_EXTS],
+      },
+    };
+  });
+
+  /**
+   * Describes files, in the background, reporting progress as it goes.
+   *
+   * Refuses a second concurrent run: two builds over the same candidates would
+   * pay twice for the same files and interleave their progress into nonsense.
+   */
+  handle('describe:build', async ({ under = null, maxFiles = null } = {}) => {
+    requireDescribeOn();
+    if (state.taggingRun) {
+      throw new Error('A description build is already running.');
+    }
+    if (!state.gemini.available) {
+      const err = new Error(
+        'Describing files needs a Gemini API key. Add one in Settings, then try again.');
+      err.code = 'NO_KEY';
+      throw err;
+    }
+
+    const cfg = state.settings.values.describe;
+    const cap = Math.min(
+      Math.max(1, Number(maxFiles) || cfg.maxFilesPerRun),
+      cfg.maxFilesPerRun);
+
+    const run = { cancelled: false };
+    state.taggingRun = run;
+    const scan = state.currentScan();
+
+    try {
+      const out = await tagIndexer.buildDescriptions(
+        { index: state.index, scanId: scan?.id || null },
+        { gemini: state.gemini, nativeImage },
+        {
+          maxFiles: cap,
+          under: under ? roots.assertInsideRoot(under, { mustExist: true }) : null,
+          // Which sorts of file the user actually agreed to describe. Passed
+          // down rather than read there, so the candidate query itself narrows
+          // and a capped run is not spent on kinds that were switched off.
+          kinds: {
+            includeDocuments: cfg.includeDocuments,
+            includeCode: cfg.includeCode,
+          },
+          onProgress: (p) => send('describe:progress', p),
+          shouldCancel: () => run.cancelled,
+        }
+      );
+      return out;
+    } finally {
+      state.taggingRun = null;
+    }
+  });
+
+  handle('describe:cancel', async () => {
+    if (!state.taggingRun) return false;
+    state.taggingRun.cancelled = true;
+    return true;
+  });
+
+  /** Finds files from a description. Reads the index; describes nothing. */
+  handle('describe:search', async (query, { limit = 40, kind = null } = {}) => {
+    const text = String(query || '').trim();
+    if (!text) throw new Error('Searching by description needs a description.');
+    return tagSearch.findByDescription(state.index, text, {
+      gemini: state.gemini,
+      limit: Math.min(Math.max(1, limit), 100),
+      kind: ['image', 'document', 'code'].includes(kind) ? kind : null,
+      exists: (p) => { try { return fs.existsSync(p); } catch { return false; } },
+    });
+  });
+
+  /** One file's description, for showing why it was returned. */
+  handle('describe:forFile', async (filePath) => {
+    const safe = roots.assertInsideRoot(filePath, { mustExist: false });
+    const row = state.index.fileTagsFor(tagIndexer.pathKeyOf(safe));
+    if (!row) return null;
+    let tags = [];
+    try { tags = JSON.parse(row.tags || '[]'); } catch { /* stored malformed */ }
+    return { ...row, tags };
+  });
+
+  /**
+   * Drops descriptions whose file is gone, and reports how many.
+   *
+   * The index is keyed on path so it can outlive a rescan; the cost of that is
+   * that it can also outlive the files. This is the sweep that reconciles it.
+   */
+  handle('describe:verify', async () => {
+    const before = state.index.tagIndexStats();
+    const removed = state.index.pruneFileTags(
+      (p) => { try { return fs.existsSync(p); } catch { return false; } });
+    return { removed, before, after: state.index.tagIndexStats() };
+  });
+
+  /** Forgets every description. Offered because it is the undo for opting in. */
+  handle('describe:clear', async () => ({ removed: state.index.clearFileTags() }));
+
+  // ── connected cloud accounts ─────────────────────────────────────────────
+  //
+  // Everything here is read-only against the provider. The scopes requested in
+  // ../cloud/providers.js grant no write access, so no handler below can modify
+  // anybody's cloud even if it were asked to. What NexaFiles does with what it
+  // reads — find duplicates, report a quota — happens on this machine.
+
+  const cloudCancel = { importing: false };
+
+  /** A usable access token, refreshed if the stored one has expired. */
+  const tokenFor = async (accountId) => {
+    const account = state.cloudAccounts.get(accountId);
+    if (!account) throw new Error('That cloud account is not connected.');
+    const tokens = state.cloudAccounts.tokensFor(accountId);
+    if (!tokens?.refreshToken && !tokens?.accessToken) {
+      const err = new Error(
+        `${account.label} needs to be signed in to again — its stored credentials ` +
+        'could not be read on this machine.');
+      err.code = 'NEEDS_REAUTH';
+      throw err;
+    }
+    if (tokens.accessToken && tokens.expiresAt > Date.now()) return tokens.accessToken;
+
+    const { clientId } = state.cloudClientId(account.provider);
+    const fresh = await cloudOauth.refresh(account.provider, clientId, tokens.refreshToken);
+    state.cloudAccounts.updateTokens(accountId, fresh);
+    return fresh.accessToken;
+  };
+
+  /**
+   * Opens one of the providers' own consoles in the system browser.
+   *
+   * Allowlisted rather than validated. `shell.openExternal` hands a string to
+   * the operating system, which will happily launch things that are not web
+   * pages at all, so the renderer is not permitted to name a destination — it
+   * can only ask for one of the two URLs this application already knows about.
+   */
+  handle('shell:openExternal', async (url) => {
+    const allowed = new Set(cloudProviders.list().map((p) => p.registerAt));
+    // A provider's own web links, which the cloud duplicate list offers so a
+    // file can be opened where it actually lives.
+    const isProviderFileLink = /^https:\/\/(drive\.google\.com|docs\.google\.com|[a-z0-9-]+[-.]sharepoint\.com|onedrive\.live\.com|1drv\.ms)\//i
+      .test(String(url || ''));
+    if (!allowed.has(url) && !isProviderFileLink) {
+      throw new Error('That link is not one NexaFiles will open.');
+    }
+    await shell.openExternal(url);
+    return true;
+  });
+
+  handle('cloud:providers', async () => ({
+    providers: cloudProviders.list().map((p) => ({
+      ...p,
+      // Whether this build already carries a client id, and from where. When it
+      // does, the interface shows a plain "Sign in" and never raises the subject
+      // at all; the paste field appears only when there is nothing to use.
+      clientId: state.cloudClientId(p.id).clientId,
+      clientIdSource: state.cloudClientId(p.id).source,
+    })),
+    accounts: state.cloudAccounts.list(),
+    canStoreCredentials: state.cloudAccounts.canPersistSecrets,
+    // Local sync folders, which are a different thing from a connected account
+    // and are listed so the interface can show both without conflating them.
+    syncFolders: await cloudFs.detectProviders().catch(() => []),
+  }));
+
+  /**
+   * Signs in. Opens the system browser, waits for the loopback redirect.
+   *
+   * The browser is the system's, not a window this application controls: a
+   * password typed into a window the app owns is a password the app could read,
+   * and the user has no address bar to check. See ../cloud/oauth.js.
+   */
+  handle('cloud:signIn', async (providerId) => {
+    const p = cloudProviders.get(providerId);
+    const { clientId } = state.cloudClientId(providerId);
+
+    const tokens = await cloudOauth.signIn(providerId, clientId, {
+      openExternal: (url) => shell.openExternal(url),
+    });
+
+    const who = await cloudClient.identity(providerId, tokens.accessToken);
+    const q = await cloudClient.quota(providerId, tokens.accessToken).catch(() => null);
+
+    const row = state.cloudAccounts.upsert({
+      provider: providerId,
+      label: p.label,
+      email: who.email,
+      displayName: who.displayName,
+      tokens,
+      quota: q,
+    });
+    return { account: state.cloudAccounts.list().find((a) => a.id === row.id) };
+  });
+
+  /**
+   * Imports an account's file listing.
+   *
+   * Metadata only — names, sizes, dates and the provider's own content hash.
+   * No file content is requested and nothing is downloaded, so importing a
+   * terabyte account transfers a few hundred kilobytes of JSON.
+   */
+  handle('cloud:import', async (accountId) => {
+    const account = state.cloudAccounts.get(accountId);
+    if (!account) throw new Error('That cloud account is not connected.');
+    if (cloudCancel.importing) throw new Error('An import is already running.');
+
+    cloudCancel.importing = true;
+    try {
+      const token = await tokenFor(accountId);
+      const out = await cloudClient.listFiles(account.provider, token, {
+        onPage: (p) => send('cloud:progress', { accountId, ...p }),
+        shouldCancel: () => !cloudCancel.importing,
+      });
+      state.index.replaceCloudFiles(accountId, account.provider, out.files);
+
+      const q = await cloudClient.quota(account.provider, token).catch(() => null);
+      state.cloudAccounts.noteImport(accountId, { fileCount: out.files.length, quota: q });
+
+      return {
+        ...out,
+        files: undefined,                     // the rows are in the database now
+        stats: state.index.cloudFileStats(accountId),
+        quota: q,
+        note: out.complete
+          ? `Listed ${out.files.length} file(s). Nothing was downloaded — this is ` +
+            'the account\'s index, not its contents.'
+          : out.note,
+      };
+    } finally {
+      cloudCancel.importing = false;
+    }
+  });
+
+  handle('cloud:cancelImport', async () => {
+    if (!cloudCancel.importing) return false;
+    cloudCancel.importing = false;
+    return true;
+  });
+
+  /**
+   * Duplicates inside connected accounts, from the providers' own hashes.
+   *
+   * The thing a sync folder can never do: matching here needed no download,
+   * because the provider had already hashed every file.
+   */
+  handle('cloud:duplicates', async ({ accountId = null, minBytes = 1 } = {}) => {
+    const groups = state.index.cloudDuplicateGroups({ accountId, minBytes });
+    const scan = state.currentScan();
+    return {
+      groups,
+      totalWasted: groups.reduce((n, g) => n + g.wastedBytes, 0),
+      stats: state.index.cloudFileStats(accountId),
+      alsoOnThisPc: scan
+        ? state.index.cloudLocalMatches(scan.id, { minBytes: 1 << 20, limit: 100 })
+        : [],
+      method:
+        'Matched on the content hash each provider computed and published in its ' +
+        'own file listing — no file was downloaded to compare. Hashes are only ' +
+        'ever grouped with hashes of the same algorithm, so a Google MD5 is never ' +
+        'compared against a OneDrive SHA-256.',
+    };
+  });
+
+  handle('cloud:stats', async (accountId = null) => state.index.cloudFileStats(accountId));
+
+  /**
+   * Forgets an account.
+   *
+   * Removes the tokens from this machine and drops the imported listing. It
+   * does not revoke anything at the provider — only the provider can do that —
+   * and the interface says so rather than implying otherwise.
+   */
+  handle('cloud:disconnect', async (accountId) => {
+    const removedFiles = state.index.clearCloudFiles(accountId);
+    const removed = state.cloudAccounts.remove(accountId);
+    return {
+      removed,
+      removedFiles,
+      note: 'The stored credentials and the imported listing are gone from this ' +
+        'machine. Access is not revoked at the provider — do that in your account ' +
+        'security settings if you want it withdrawn there too.',
+    };
+  });
+
   // ── startup and background load ──────────────────────────────────────────
   handle('startup:list', async () => {
     state.lastStartup = await listStartupItems({ listProcesses });
@@ -1000,6 +1361,11 @@ function register(state, mainWindow) {
       categoryByYear: state.index.categoryByYear(scan.id, 3),
       recent: state.index.recentlyModified(scan.id, 10),
       quarantineBytes: state.quarantine.totalBytes(),
+      // What of this scan is in a sync folder rather than on this disk.
+      // Reported as its own figure rather than folded into the totals, because
+      // both numbers are true and they answer different questions: what these
+      // files weigh, and how much of the disk they are using.
+      cloud: state.index.cloudSummary(scan.id),
     };
   });
 
@@ -1022,6 +1388,26 @@ function register(state, mainWindow) {
   });
 
   // ── plans ────────────────────────────────────────────────────────────────
+
+  /**
+   * Attaches what the scan knows about a path's sync status to a plan spec.
+   *
+   * Applied to every spec on its way into a plan, from whichever scanner
+   * produced it. A file inside OneDrive or Google Drive is not deleted only
+   * from this machine — the sync client carries the deletion to the cloud and
+   * to every other device — and an entry that reached the approval screen
+   * without saying so would be the application breaking its own promise that
+   * you can always see what a removal really does.
+   */
+  const withCloudInfo = (spec) => {
+    const scan = state.currentScan();
+    if (!scan) return spec;
+    const info = spec.isDirectory
+      ? state.index.cloudInfoForTree(scan.id, spec.path)
+      : state.index.cloudInfoForPath(scan.id, spec.path);
+    return info ? { ...spec, ...info } : spec;
+  };
+
   handle('plan:fromDuplicates', async (tier) => {
     const key = tier === 'image' ? 'image'
       : tier === 'text' ? 'text'
@@ -1036,7 +1422,7 @@ function register(state, mainWindow) {
     const specs = (key === 'video' || key === 'text')
       ? contentDupes.contentDupesToPlanEntries(found.groups, { ACTION, CATEGORY, CONFIDENCE })
       : duplicates.duplicatesToPlanEntries(found.groups, { Plan, CATEGORY, ACTION, CONFIDENCE });
-    for (const spec of specs) plan.add(spec);
+    for (const spec of specs) plan.add(withCloudInfo(spec));
     for (const n of (found.notes || [])) plan.addNote(n);
     if (found.partial) {
       plan.addNote(
@@ -1076,7 +1462,7 @@ function register(state, mainWindow) {
       // Skip anything outside an approved root rather than proposing something
       // that would be refused at execution time.
       try { roots.assertInsideRoot(spec.path, { mustExist: true }); } catch { continue; }
-      plan.add(spec);
+      plan.add(withCloudInfo(spec));
     }
     state.registerPlan(plan);
     return plan.toJSON();

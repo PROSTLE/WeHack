@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('nexa', {
 
   locations: {
     drives: () => call('locations:drives'),
+    // Sync folders found on this machine. Local knowledge only — this signs in
+    // to nothing and contacts nothing.
+    cloud: () => call('locations:cloud'),
     folders: () => call('locations:folders'),
     home: () => call('locations:home'),
   },
@@ -112,10 +115,57 @@ contextBridge.exposeInMainWorld('nexa', {
     cancel: () => call('leftovers:cancel'),
   },
 
+  // Describing files, and finding them by description. This is the one part of
+  // NexaFiles that sends file contents anywhere, so every call below refuses
+  // until the setting is on — the refusal names the setting, so a feature that
+  // is switched off never looks broken.
+  describe: {
+    status: () => call('describe:status'),
+    // Spends one API call per file, so it is bounded and interruptible.
+    build: (opts) => call('describe:build', opts || {}),
+    cancel: () => call('describe:cancel'),
+    // Reads the index; describes nothing and costs nothing but the expansion.
+    search: (query, opts) => call('describe:search', query, opts || {}),
+    forFile: (filePath) => call('describe:forFile', filePath),
+    // Drops descriptions of files that are gone.
+    verify: () => call('describe:verify'),
+    clear: () => call('describe:clear'),
+    onProgress: (h) => on('describe:progress', h),
+  },
+
   // Startup entries, and switching them off. `setEnabled` names an item by the
   // four fields that identify it rather than sending a registry path to write
   // to: the main process resolves those against what it actually enumerated,
   // so the renderer can only ever act on something that is really there.
+  // Opening a link in the real browser. The renderer cannot name a destination:
+  // the main process allowlists which URLs it will open, because openExternal
+  // hands a string to the operating system and the OS will launch more than
+  // web pages.
+  shell: {
+    openExternal: (url) => call('shell:openExternal', url),
+  },
+
+  // Connected cloud accounts. Every call is read-only against the provider —
+  // the OAuth scopes requested grant no write access at all, so nothing here
+  // can modify anybody's cloud. Tokens never cross this bridge in either
+  // direction: they are encrypted in the main process and used there.
+  cloud: {
+    // Providers, their registered client ids, and the accounts already signed in.
+    providers: () => call('cloud:providers'),
+    // Opens the system browser and waits for the loopback redirect.
+    signIn: (providerId) => call('cloud:signIn', providerId),
+    // Pulls the file listing: names, sizes, dates and the provider's own hash.
+    // Downloads no file content.
+    import: (accountId) => call('cloud:import', accountId),
+    cancelImport: () => call('cloud:cancelImport'),
+    // Duplicates found on the providers' published hashes, without downloading.
+    duplicates: (opts) => call('cloud:duplicates', opts || {}),
+    stats: (accountId) => call('cloud:stats', accountId),
+    // Forgets the account here. Does not revoke access at the provider.
+    disconnect: (accountId) => call('cloud:disconnect', accountId),
+    onProgress: (h) => on('cloud:progress', h),
+  },
+
   startup: {
     list: () => call('startup:list'),
     setEnabled: (ref, enabled) => call('startup:setEnabled', ref, enabled),

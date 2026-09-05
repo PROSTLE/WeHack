@@ -35,6 +35,9 @@ export const state = {
   voice: null,          // which dictation engine would answer right now
   wakeModel: null,      // whether the wake word's acoustic model is downloaded
   wakeProgress: null,   // {received,total,ratio} while it is being fetched
+  // How many files have been described so far. Kept beside the toggle so the
+  // panel can always say what has been sent, not only what may be.
+  describeIndex: null,
   loading: false,
 };
 
@@ -66,6 +69,10 @@ export async function load({ force = false } = {}) {
   if (force || !state.wakeModel) {
     jobs.push(nexa.wake.modelStatus().then((v) => { state.wakeModel = v; }).catch(() => {}));
   }
+  if (force || !state.describeIndex) {
+    jobs.push(nexa.describe.status()
+      .then((v) => { state.describeIndex = v.indexed; }).catch(() => {}));
+  }
   if ((state.section === 'machine' && (force || !state.machine))) {
     jobs.push(H.guard(() => nexa.system.machine(), 'Reading machine details').then((v) => { state.machine = v; }));
   }
@@ -81,6 +88,14 @@ export async function load({ force = false } = {}) {
 export async function show(section) {
   if (section) state.section = section;
   await load();
+}
+
+/** Re-reads how many files have been described, after a change to that. */
+async function refreshDescribeIndex() {
+  try {
+    const s = await nexa.describe.status();
+    state.describeIndex = s.indexed;
+  } catch { /* the panel simply shows no count */ }
 }
 
 // ── render ─────────────────────────────────────────────────────────────────
@@ -360,7 +375,7 @@ function assistant() {
     ${wakeModelBlock()}`
   );
 
-  return keyPanel + dictationPanel() + modelPanel + overlayPanel + toolPanel;
+  return keyPanel + dictationPanel() + describePanel() + modelPanel + overlayPanel + toolPanel;
 }
 
 /**
@@ -456,6 +471,91 @@ export function rerenderProgress() {
  * silently when the checkbox is ticked: it is forty megabytes, and a checkbox
  * that quietly pulls forty megabytes is a checkbox that lied about what it did.
  */
+/**
+ * Describing files, and the undo for having done it.
+ *
+ * This panel exists as much to be switched *off* as on. It is the only feature
+ * in NexaFiles that sends the contents of a user's files anywhere, so the
+ * count of what has been sent, and the button that deletes all of it, are both
+ * on screen at all times rather than being something to go and find.
+ */
+function describePanel() {
+  const esc = H.esc;
+  const d = state.settings?.describe;
+  if (!d) return '';
+  const idx = state.describeIndex;          // filled by the status call
+  const hasKey = !!state.agent?.configured;
+
+  return panel(
+    'Describing files, to find them by description',
+    'Every other search in NexaFiles matches something measured off your disk. This one ' +
+    'shows each picture and document to the model once and stores the words it comes back ' +
+    'with, so “a photo of a brown dog on grass” can find ' +
+    '<span class="mono">IMG_4821.JPG</span>. It is the one feature that sends the contents ' +
+    'of your files to Google, which is why it is off until you switch it on.',
+    `
+    <label class="set-check warn">
+      <input type="checkbox" id="set-describe-enabled" ${d.enabled ? 'checked' : ''}
+             ${hasKey ? '' : 'disabled'}>
+      <span><strong>Let NexaFiles describe my files.</strong> Nothing is sent by switching
+        this on: it only unlocks the button in the Discover view. From then on, each file
+        you choose to describe — its pixels if it is an image, its text if it is a
+        document — is sent to the Gemini API once, and the words that come back are stored
+        on this machine. A file that has not changed is never sent twice.
+        ${hasKey ? '' : '<em>An API key has to be configured above first.</em>'}</span>
+    </label>
+
+    ${d.enabled ? `
+      <div class="set-field">
+        <label for="set-describe-cap">Most files to describe in one run</label>
+        <div class="set-input-row">
+          <input type="number" id="set-describe-cap" class="set-input mono"
+                 min="10" max="5000" step="10" value="${Number(d.maxFilesPerRun)}">
+          <span class="muted">one API call each</span>
+        </div>
+        <p class="set-hint">A ceiling on what a single press of “Describe my files” can
+          spend. Raising it does not describe more on its own — the button still has to be
+          pressed, and it can be stopped part-way.</p>
+      </div>
+
+      <label class="set-check">
+        <input type="checkbox" id="set-describe-docs" ${d.includeDocuments ? 'checked' : ''}>
+        <span><strong>Describe documents too, not only pictures.</strong> Pictures are what
+          this feature exists for — nothing on disk says what is in one. A document’s words
+          can already be searched without sending it anywhere, from the assistant.</span>
+      </label>
+      <label class="set-check">
+        <input type="checkbox" id="set-describe-code" ${d.includeCode ? 'checked' : ''}>
+        <span><strong>Describe source code as well.</strong> Off by default: a project
+          folder is thousands of files, and each one would be a separate call.</span>
+      </label>
+    ` : ''}
+
+    ${idx ? `
+      <div class="set-row" style="margin-top:12px">
+        <span class="pill ${idx.described ? 'ok' : ''}">
+          ${icon(idx.described ? 'check' : 'info', { size: 12 })}
+          ${Number(idx.described).toLocaleString()} file(s) described
+        </span>
+        <span class="muted">
+          ${idx.files > idx.described
+            ? `${Number(idx.files - idx.described).toLocaleString()} more were looked at and could not be described`
+            : 'held on this machine, in NexaFiles’ own database'}
+        </span>
+      </div>` : ''}
+
+    ${idx && idx.files ? `
+      <div class="set-row">
+        <button class="btn" id="set-describe-verify">${icon('check')} Verify</button>
+        <button class="btn destructive" id="set-describe-clear">${icon('trash')} Delete every description</button>
+      </div>
+      <p class="set-hint">Verify drops descriptions of files that no longer exist. Deleting
+        them all is the undo for having switched this on: the stored words go, and nothing
+        is re-sent unless you describe again. It does not reach what the API already
+        received — only Google can speak to that.</p>` : ''}`
+  );
+}
+
 function wakeModelBlock() {
   const m = state.wakeModel;
   const p = state.wakeProgress;
@@ -750,6 +850,66 @@ export function wire(stage) {
     saveOverlay({ wakeWord: ev.target.checked }));
   stage.querySelector('#set-overlay-try')?.addEventListener('click', async () => {
     await H.guard(() => nexa.overlay.show(), 'Opening the overlay');
+  });
+
+  // ── describing files ─────────────────────────────────────────────────────
+
+  const saveDescribe = async (patch) => {
+    state.settings = await H.guard(() => nexa.settings.set({ describe: patch }), 'Saving');
+    await refreshDescribeIndex();
+    H.rerender();
+  };
+
+  stage.querySelector('#set-describe-enabled')?.addEventListener('change', async (ev) => {
+    if (!ev.target.checked) { await saveDescribe({ enabled: false }); return; }
+    // Switching it on is the moment the user agrees that their files may be
+    // sent, so it is said in those words rather than implied by a toggle.
+    const ok = window.confirm(
+      'Let NexaFiles describe your files?\n\n' +
+      'From then on, each file you choose to describe is sent to the Gemini API — ' +
+      'the pixels of a picture, the text of a document — and the words that come ' +
+      'back are stored on this machine.\n\n' +
+      'Switching this on sends nothing by itself. Nothing leaves until you press ' +
+      '"Describe my files" in the Discover view, and you can delete every stored ' +
+      'description from here afterwards.');
+    if (!ok) { ev.target.checked = false; return; }
+    await saveDescribe({ enabled: true });
+    H.toast('Describing is on. Nothing has been sent yet — use the Discover view.');
+  });
+
+  stage.querySelector('#set-describe-docs')?.addEventListener('change', (ev) =>
+    saveDescribe({ includeDocuments: ev.target.checked }));
+  stage.querySelector('#set-describe-code')?.addEventListener('change', (ev) =>
+    saveDescribe({ includeCode: ev.target.checked }));
+  stage.querySelector('#set-describe-cap')?.addEventListener('change', (ev) => {
+    const n = Number(ev.target.value);
+    if (Number.isFinite(n)) saveDescribe({ maxFilesPerRun: n });
+  });
+
+  stage.querySelector('#set-describe-verify')?.addEventListener('click', async () => {
+    const out = await H.guard(() => nexa.describe.verify(), 'Verifying');
+    if (!out) return;
+    await refreshDescribeIndex();
+    H.rerender();
+    H.toast(out.removed
+      ? `Dropped ${out.removed} description(s) of files that are gone.`
+      : 'Every described file is still where it was.');
+  });
+
+  stage.querySelector('#set-describe-clear')?.addEventListener('click', async () => {
+    const n = state.describeIndex?.files || 0;
+    const ok = window.confirm(
+      `Delete all ${n} stored description(s)?\n\n` +
+      'The words NexaFiles stored about your files are removed from this machine. ' +
+      'Your files are not touched.\n\n' +
+      'This cannot reach what the API already received — only Google can speak to ' +
+      'that. It also means describing again would re-send those files.');
+    if (!ok) return;
+    const out = await H.guard(() => nexa.describe.clear(), 'Deleting descriptions');
+    if (!out) return;
+    await refreshDescribeIndex();
+    H.rerender();
+    H.toast(`Deleted ${out.removed} description(s).`);
   });
 
   // ── dictation ────────────────────────────────────────────────────────────

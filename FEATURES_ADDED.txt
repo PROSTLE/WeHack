@@ -1,0 +1,526 @@
+================================================================================
+ NexaFiles — what was added in this round, and how to use it
+================================================================================
+
+Everything below is in the working tree of this repository. Where something
+already existed before this round and was only reused, it says so — nothing here
+is claimed as new unless it is.
+
+Two commits' worth of work:
+  * commit 7a74b8e   startup management, cancellable scans, openable duplicates,
+                     Overview layout
+  * uncommitted      describe-a-file-to-find-it, and the assistant opening files
+
+--------------------------------------------------------------------------------
+ CONTENTS
+--------------------------------------------------------------------------------
+  0. Cloud sync folders (OneDrive / Google Drive / Dropbox)
+ 0b. Connecting a cloud account (login, import, hash-based duplicates)
+  1. Find a file by describing it  (including "describe an image")
+  2. The assistant can open a file
+  3. Duplicates: open the files in a group
+  4. Startup: manage it, not just read it
+  5. Running now: see and close background programs
+  6. Stop button for long scans
+  7. Overview: reorganised
+  8. Quarantine: explained
+  9. What was NOT taken from the addon projects, and why
+ 10. Files added and changed
+ 11. How to test it
+
+--------------------------------------------------------------------------------
+ 0. CLOUD SYNC FOLDERS (OneDrive / Google Drive / Dropbox)
+--------------------------------------------------------------------------------
+THE FINDING THAT DROVE THIS
+  Measured on this machine, in C:\Users\HP\OneDrive:
+
+      the files report      9,100 KB
+      actually on the disk      4 KB
+      online-only files             7 of 11
+
+  Windows calls this Files On-Demand. The directory entry exists, the filesystem
+  reports the full size, and none of those bytes are here. Reading one byte
+  downloads the whole file.
+
+  NexaFiles could already scan that folder — it is just a folder — and had no
+  idea. That broke three things at once:
+
+    1. THE MEASUREMENT. The app's central claim is that it shows what is
+       actually on your disk. Counting 8.9 MB of placeholders as disk usage made
+       that claim false, and made "reclaimable" meaningless.
+    2. THE BANDWIDTH. Duplicate detection hashes file contents; describing sends
+       them. Run over a dehydrated OneDrive, either would have DOWNLOADED THE
+       ENTIRE ACCOUNT — for a large one that is hundreds of GB, hours, and on a
+       metered connection, money.
+    3. THE DATA. Deleting a file inside a sync folder does not just delete it
+       here. The sync client carries the deletion to the cloud and to every
+       other signed-in device, where NexaFiles' recycle bin and quarantine
+       cannot reach it.
+
+WHAT WAS BUILT
+  * Sync-folder detection (src/main/fs/cloud.js). Finds OneDrive (including the
+    "OneDrive - Company" business variants via the environment), Google Drive
+    both as a folder and as a mounted letter, Dropbox, iCloud Drive and Box.
+    Nothing is contacted; no credentials; this is a question about directories.
+  * Every scanned file now records `physicalSize` alongside `size`, taken from
+    the block count the stat already returned — so it costs nothing at scan
+    time. Schema v7.
+  * MEASURED vs INFERRED are kept apart. `physicalSize` is a measurement.
+    "Placeholder" is an inference and requires TWO conditions: inside a known
+    sync folder AND larger than 4 KB. That floor matters — NTFS stores a small
+    file inside its own MFT record where it also reports zero blocks, and
+    desktop.ini (93 bytes) on this machine does exactly that. A naive
+    "blocks == 0" check would have called it a phantom.
+  * Duplicate scans and description builds SKIP online-only files, and can say
+    how many they left alone and why. `includeCloud: true` overrides it.
+  * Nothing inside a sync folder is EVER pre-selected in a cleanup plan —
+    whatever its category or confidence. You can still select it deliberately;
+    what is refused is doing it for you.
+  * Every such plan entry carries the warning about what deletion really means,
+    and records what it would actually free here (nothing, for a placeholder).
+
+HOW TO USE IT
+  Nothing to switch on. Scan a folder that contains or is inside a sync folder
+  and the Overview grows an "In cloud folders" panel showing the two totals side
+  by side and the gap between them.
+
+WHAT WAS *NOT* BUILT, AND WHY
+  Google Drive / OneDrive **API** integration (OAuth, server-side search of
+  cloud-only content) was considered and deliberately not done:
+    * A desktop app cannot keep an OAuth client secret secret, so it would mean
+      asking you to register your own Google Cloud project — a lot of friction
+      for the benefit.
+    * It would put NexaFiles' credentials on the network permanently, against
+      the "nothing leaves your machine unless you ask" line the app draws.
+    * It buys little that the sync folder does not already give: names, sizes,
+      dates and folder structure are all visible locally today. Only the
+      CONTENTS of never-downloaded files are out of reach, and reading those
+      means downloading them either way.
+  If you do want it later, the honest version is a separate opt-in on the same
+  footing as describing files, and it should be its own round of work.
+
+  Also not done: reading your cloud storage QUOTA (how full your OneDrive is).
+  That genuinely needs an API call, and is the one thing the local folder cannot
+  answer.
+
+--------------------------------------------------------------------------------
+ 0b. CONNECTING A CLOUD ACCOUNT (login, import, duplicates)
+--------------------------------------------------------------------------------
+WHY IT IS WORTH THE COMPLEXITY
+  One reason, and it is a good one: BOTH PROVIDERS PUBLISH A CONTENT HASH THEY
+  COMPUTED THEMSELVES, in the ordinary file listing.
+
+      Google Drive   md5Checksum        on every stored binary file
+      OneDrive       file.hashes        quickXorHash always, sha1/sha256 often
+
+  So exact duplicates can be found across an entire cloud account WITHOUT
+  DOWNLOADING A BYTE. Locally that is impossible — hashing needs the bytes,
+  which is why the placeholder guard has to skip online-only files entirely.
+  Here the provider already did the hashing. The other thing only the API can
+  answer is your storage quota.
+
+HOW TO USE IT
+  1. Cloud view (left rail) → paste a client ID → Save.
+  2. "Sign in with Google Drive" / "Sign in with OneDrive". Your BROWSER opens
+     on the provider's own page. NexaFiles never sees your password.
+  3. "Import" — reads the account's index: names, sizes, dates, hashes.
+     Downloads nothing. A terabyte account costs a few hundred KB of JSON.
+  4. "Find duplicates" — groups by the providers' own hashes.
+
+THE CLIENT ID, AND WHY THERE IS NO WAY AROUND IT
+  Every OAuth request must carry a client_id; there is no anonymous sign-in.
+  But it is NOT a per-user step and NOT a secret — every app with a "Sign in
+  with Google" button ships one openly in its binary. It names the application,
+  not the person.
+
+  So it is a ONE-TIME step for whoever builds this copy. Put it in config.js
+  (see config.example.js) or the environment:
+
+      CLOUD_GOOGLE_CLIENT_ID       console.cloud.google.com → enable "Google
+                                   Drive API" → OAuth client ID → "Desktop app"
+      CLOUD_MICROSOFT_CLIENT_ID    entra.microsoft.com → App registrations →
+                                   Authentication → "Mobile and desktop
+                                   applications" → redirect http://localhost →
+                                   allow public client flows
+
+  Precedence: Settings (typed by the user) > environment > config.js. When a
+  client ID is present the setup UI disappears entirely and the Cloud view is
+  just a "Sign in with …" button.
+
+  BEFORE DISTRIBUTING TO OTHER PEOPLE: Google classes `drive.readonly` as a
+  RESTRICTED scope. For yourself plus up to 100 accounts added as test users, an
+  unverified app works fine and costs nothing. Publishing publicly with that
+  scope needs Google verification AND an annual third-party security assessment
+  (CASA), which is a real recurring expense. Microsoft imposes no equivalent
+  burden on `Files.Read`.
+
+FOUR SECURITY DECISIONS, EACH DELIBERATE
+  * READ-ONLY SCOPES, permanently. `drive.readonly` and `Files.Read`. There is
+    no code path that could rename, move or delete anything in your cloud,
+    because the token is not permitted to. A test fails if a write scope ever
+    appears in the provider table.
+  * THE SYSTEM BROWSER, not an embedded window. RFC 8252 §8.12: a password typed
+    into a window this app controls is a password this app could read, and you
+    would have no address bar to check. You sign in on the real page.
+  * PKCE, NO CLIENT SECRET. A desktop app hands its binary to the user, so a
+    compiled-in secret is not secret. There is nowhere in the code to put one,
+    and a test asserts that.
+  * TOKENS ENCRYPTED AT REST via the OS credential store (DPAPI / Keychain /
+    secret service). On a machine with no such store NexaFiles REFUSES to save
+    the sign-in rather than writing a refresh token in plain text. Silently
+    downgrading protection on a long-lived credential is exactly what a user
+    would never find out about.
+
+  Also: an MD5 from Google is never grouped with a SHA-256 from OneDrive. They
+  are not comparable, and reporting them as a match would be a fabricated
+  result. Cloud-to-local matching is only claimed where the algorithms line up.
+
+A BUG THIS ROUND CAUGHT, WORTH RECORDING
+  The first version of placeholder detection tested `blocks == 0`. That is right
+  for OneDrive, whose Files On-Demand leaves NTFS placeholders allocating zero
+  blocks. It is WRONG for Google Drive's mounted G:, which is a virtual
+  filesystem: its driver reports FULL allocation for every file whether or not a
+  byte is cached. Measured on a real drive — a 28 MB video never downloaded
+  reports 54,649 allocated blocks.
+
+  Unfixed, NexaFiles would have reported an entirely streamed Google Drive as
+  fully resident on the disk: the same overstatement the cloud work exists to
+  prevent, in the opposite direction. Virtual-drive files now report their
+  footprint as UNKNOWN rather than guessed, are excluded from both totals rather
+  than folded into either, and still trigger the download guards.
+
+WHAT IS NOT VERIFIED
+  The live OAuth round-trip. There was no account available to sign in with, so
+  real sign-in, real import and real quota are UNTESTED against actual servers.
+  Everything around them is tested with faked responses. The first real sign-in
+  is the thing to watch.
+
+--------------------------------------------------------------------------------
+ 1. FIND A FILE BY DESCRIBING IT           <- the headline feature
+--------------------------------------------------------------------------------
+WHAT IT SOLVES
+  Every other search in NexaFiles matches something measured off the disk: a
+  name, a size, the words inside a document. None of them can find a photograph,
+  because nothing written on a photo says what is in it. A picture of a dog
+  called IMG_4821.JPG has nothing on disk connecting it to the word "dog".
+
+HOW IT WORKS
+  Each picture and document is shown to Gemini once. The model writes down what
+  it sees as a bag of lower-case words ("dog", "brown dog", "grass", "outdoor").
+  Those words are stored on this machine in SQLite's own full-text index. When
+  you later type a description, the words you typed are expanded into synonyms
+  and matched against the stored ones.
+
+  A file that has not changed is never sent twice. A file that HAS changed gets
+  re-described automatically, because the freshness key is (path, size, mtime).
+
+HOW TO USE IT
+  1. Settings > Assistant > "API key"      - add a Gemini key if you have none.
+  2. Settings > Assistant > "Describing files, to find them by description"
+                                           - tick the box. You are asked to
+                                             confirm, because this is the one
+                                             feature that sends your files out.
+                                             Ticking it SENDS NOTHING by itself.
+  3. Open the "Discover" view in the left rail.
+  4. Press "Describe my files". It walks your last scan (or your approved
+     folders if you have not scanned), describes up to the per-run cap, and
+     shows live progress. Press Stop at any time and it keeps what it did.
+  5. Type a description and press Enter:
+         a photo of a brown dog on grass
+         the screenshot with the red error message
+         my invoice from last year
+         a picture of handwritten notes
+  6. Filter by Pictures / Documents / Code with the chips.
+  7. Each result shows a thumbnail, the tags that matched (filled chips), and a
+     "Why this one" that opens onto every word the model used plus the real
+     path. Open, or use the folder icon to show it in Explorer.
+
+  You can also just ask the assistant in plain language — it has a tool for
+  this (find_files_by_description) and will use it whenever you describe a
+  picture rather than name a file.
+
+COST AND PRIVACY
+  * One Gemini API call per file described. The per-run cap (default 200)
+    bounds what a single button press can spend; it is clamped to 10..5000.
+  * Off by default. Nothing is sent until you switch it on AND press the button.
+  * Settings > Assistant shows how many files have been described, and has
+    "Delete every description" — the undo for having opted in. That removes the
+    stored words from this machine. It cannot reach what the API already
+    received; only Google can speak to that, and the interface says so.
+  * "Verify" drops descriptions of files that no longer exist.
+
+HONESTY RULES BUILT IN
+  * Every stored row records WHICH model wrote it and WHEN.
+  * Tags render as chips, never in the monospace/tabular style every measured
+    figure in the app uses, so a description cannot be mistaken for a
+    measurement.
+  * A file examined but not describable is stored with the reason, so
+    "nothing matched" is never confused with "never looked at".
+  * An empty index says "nothing has been described yet", not "no matches".
+  * The results panel always states that only described files can appear.
+
+--------------------------------------------------------------------------------
+ 2. THE ASSISTANT CAN OPEN A FILE
+--------------------------------------------------------------------------------
+WHAT IT DOES
+  Say "open the quarterly report" or "show me that photo" and the assistant
+  opens it in whatever application Windows associates with it.
+
+HOW TO USE IT
+  Just ask, in the side panel or the overlay. The assistant will find the file
+  first (by name, by content, or by description), ask which one you meant if
+  several match, then open the one you pick.
+
+WHAT IT REFUSES, AND WHY
+  * A path outside a folder you approved.  (Same root sandbox as everything.)
+  * A folder — it says to name a file inside it instead.
+  * A PROGRAM (.exe, .bat, .lnk, ...). Refused outright, not confirmed. The
+    Files view asks about running a program in a real system dialog that the
+    renderer cannot forge or suppress; a sentence in a chat window is not that.
+    "Open the report" is a reasonable thing to say to an assistant. "Run this
+    installer" is not something it should be able to act on.
+
+--------------------------------------------------------------------------------
+ 3. DUPLICATES: OPEN THE FILES IN A GROUP
+--------------------------------------------------------------------------------
+WHAT CHANGED
+  The duplicate list showed files but could not open them, and ran every group
+  together in one table so "the files in this group" was a claim the markup
+  never actually made.
+
+  * Each group now has a header: "3 copies of photo.jpg — 200 KB reclaimable if
+    you keep one", plus the sub-clip detail for video matches.
+  * Every file has Open and "show in its folder"; double-clicking a row opens it.
+  * The copy that would be kept is marked and has a green edge.
+  * Opening routes through the Files view's own handler, so a stray installer
+    sitting in a duplicate list still gets the "run this program?" dialog.
+
+HOW TO USE IT
+  Duplicates view > pick a tier > double-click any row, or use the two icons at
+  the right of each row.
+
+--------------------------------------------------------------------------------
+ 4. STARTUP: MANAGE IT, NOT JUST READ IT
+--------------------------------------------------------------------------------
+WHAT CHANGED
+  The view listed names with no state and no cost. It could not tell you what
+  was already off, and could not tell you which of forty entries was holding
+  four hundred megabytes.
+
+  Now each entry shows:
+  * whether Windows is currently honouring it (on / off),
+  * what it is costing in memory right this second,
+  * the evidence for how NexaFiles found it,
+  * a switch.
+
+HOW SWITCHING OFF WORKS
+  On Windows this writes the same StartupApproved byte that Task Manager
+  writes. The Run value or Startup-folder shortcut stays exactly where its
+  installer put it, and Windows is told to skip it. Nothing is deleted, so every
+  switch has an equal switch back — and an item disabled here also shows as
+  disabled in Task Manager.
+  * Scheduled tasks use Disable-ScheduledTask / Enable-ScheduledTask.
+  * Services are set to Manual (never Disabled), so anything that genuinely
+    needs one can still start it on demand.
+  * Machine-wide entries and services need administrator. They are shown, and
+    say so BEFORE you press anything, rather than failing afterwards.
+
+HOW TO USE IT
+  Startup view > "Starts with Windows" tab > "List what starts with Windows".
+  Filter with Everything / Switched on / Switched off / Running now / Heaviest
+  first. Press "Turn off" on a row. Note that switching an entry off does not
+  close it if it is already running — it stops it starting NEXT time.
+
+--------------------------------------------------------------------------------
+ 5. RUNNING NOW: SEE AND CLOSE BACKGROUND PROGRAMS
+--------------------------------------------------------------------------------
+WHAT IT DOES
+  A second tab in the Startup view lists everything running, ONE ROW PER PROGRAM
+  rather than one per process — a browser is thirty processes, and what you want
+  to know is what the browser costs.
+
+HOW TO USE IT
+  Startup view > "Running now". Optionally "With CPU" to spend one second
+  measuring a real CPU percentage. Press Close on a row.
+
+HOW CLOSING WORKS
+  The program's windows are asked to close first — the same request clicking its
+  X makes — so anything with unsaved work can put up its own prompt. Only if it
+  does not go is it terminated. This is the only action in NexaFiles with no
+  undo, and the confirmation says so along with the process count and memory.
+
+WHAT IS REFUSED OUTRIGHT (not warned about)
+  * Processes Windows needs: csrss, lsass, wininit, winlogon, services,
+    svchost, smss, dwm and others. Ending them bugchecks the machine.
+  * Security software (Defender's MsMpEng and a list of third-party agents).
+    Freeing a few hundred megabytes is not worth leaving the machine
+    unprotected, and Windows would refuse anyway.
+  * NexaFiles' own process group. It checks EVERY pid in a group, not just the
+    first, because NexaFiles is itself several processes under one name.
+  * explorer.exe is allowed but carries a warning that the desktop and taskbar
+    will disappear until Windows restarts it.
+
+--------------------------------------------------------------------------------
+ 6. STOP BUTTON FOR LONG SCANS
+--------------------------------------------------------------------------------
+WHAT CHANGED
+  Comparing a disk takes minutes and there was no way to call it off. The
+  scanners already took a shouldCancel predicate; it is now wired to a button.
+
+HOW TO USE IT
+  While a duplicate or leftover scan runs, press "Stop" in the progress bar.
+
+WHAT HAPPENS TO A STOPPED SCAN
+  It hands back what it found. That is real — every group was verified before it
+  was reported — but its ABSENCES are not, so:
+  * the panel says the search was cut short,
+  * a plan built from it carries a note saying the total is a floor not a total,
+  * the assistant's tool result is flagged incomplete so it cannot report a
+    partial figure as a complete one.
+
+--------------------------------------------------------------------------------
+ 7. OVERVIEW: REORGANISED
+--------------------------------------------------------------------------------
+WHAT CHANGED
+  The page was eight full-width panels of identical visual weight in the order
+  they happened to be written, with a panel about the processor sitting in the
+  middle of four panels about the disk.
+
+  It is now four named sections, in the order the questions get asked:
+    (hero)             what can I get back
+    WHERE THE SPACE IS category cards, the treemap, the drive
+    WORTH A LOOK       largest files, recently changed, storage by year
+    THIS MACHINE       uptime and the session graph
+
+  Also:
+  * The headline figure gained a container and the three facts that scale it
+    (measured / files / folders / scanned root).
+  * The drive panel stopped repeating the category breakdown that the cards
+    above it and the treemap legend below it were both already showing — three
+    statements of one fact on a single screen.
+  * The sparkline on each category card is now labelled "by month last changed",
+    because an unlabelled line under a byte figure reads as growth over time and
+    it is not that. "first scan" became "no earlier scan".
+  * Paths in tables stopped wrapping over three or four lines; they clip to one
+    line with the full path on the row's tooltip. Byte figures stopped wrapping.
+
+--------------------------------------------------------------------------------
+ 8. QUARANTINE: EXPLAINED
+--------------------------------------------------------------------------------
+  The name is jargon and the empty state assumed you already knew it. It now
+  explains itself, in the app and in the README.
+
+  It is NOT an antivirus quarantine and NOT a second recycle bin.
+
+  * Files you would recognise — a photo, a document, a download — go to the
+    RECYCLE BIN, because that is the undo you already know how to use.
+  * Quarantine is for application INTERNALS: leftover cache and support folders
+    from under AppData. Those have to go back to the exact path, name and
+    timestamp they came from, or the application that owns them behaves as
+    though its data is gone. Dragging a folder out of the recycle bin does not
+    reliably do that; restoring from here does, and if the original path is now
+    occupied it restores alongside rather than overwriting.
+  * Every entry keeps the evidence that justified removing it, so if something
+    breaks a week later, "what was taken, and why" has an answer.
+  * Nothing is actually deleted for 30 days.
+
+--------------------------------------------------------------------------------
+ 9. WHAT WAS NOT TAKEN FROM THE ADDON PROJECTS, AND WHY
+--------------------------------------------------------------------------------
+The addon/ folder holds two prior projects. What was taken is the IDEA, written
+fresh in this codebase's own style. What was deliberately left is listed here so
+the decisions are on the record.
+
+FROM Context_Aware_Tag_Based_File_Search_Using_LLMs (the tag-search project)
+  TAKEN   The core technique: one multimodal model call per file producing a
+          keyword bag; and expanding a fuzzy query into synonyms before matching.
+  NOT TAKEN — LLM-generated SQL executed verbatim.
+          Query_runner.py runs whatever Gemini emits straight against Postgres.
+          Here the model emits ONLY a list of words. The FTS5 match expression is
+          built in src/main/search/tag-search.js by code you can read, with every
+          term quoted into a literal. A term containing OR, NEAR, quotes or
+          parentheses cannot change the shape of the query. There are tests for
+          exactly this.
+  NOT TAKEN — eval() on the model's reply.
+          populate.py's fix_tags evaluates the model's output. Here the reply is
+          JSON.parse'd and then checked field by field; anything that is not a
+          string is dropped and every character that could execute is stripped.
+          There is a test that would create a file on disk if this regressed.
+  NOT TAKEN — hardcoded database credentials. Not applicable; no server.
+  NOT TAKEN — PostgreSQL. NexaFiles uses the SQLite that ships inside Node, so
+          this adds no dependency and nothing to install.
+
+FROM file-brain
+  NOT TAKEN — its source files. file-brain is GPLv3. The architectural ideas
+          (orphan verification, export format, the watcher pattern) are not
+          copyrightable methodology and were reimplemented; no file was copied.
+  NOT TAKEN — Docker + Typesense + Tika. That is a container stack you then have
+          to manage, and it contradicts NexaFiles' "nothing to install" pitch.
+  ALREADY EXISTED — native OS thumbnails. The reference plan listed this as a
+          gap to port from file-brain's ctypes/COM IShellItemImageFactory code.
+          It is NOT a gap: NexaFiles already had explorer:thumbnail using
+          Electron's nativeImage.createThumbnailFromPath, which reaches the same
+          Windows thumbnail provider. The Discover grid REUSES it. Nothing was
+          added for thumbnails and it is not claimed as new.
+  NOT DONE THIS ROUND — the live file watcher and incremental re-index, the
+          local ONNX semantic search, per-root watch-path configuration, the
+          dashboard donut drill-down, and the CI changelog. These are real ideas
+          and remain open; the watcher in particular is the biggest structural
+          gap ("manual scans only") and would change the app's background-CPU
+          behaviour, which deserves its own round.
+
+--------------------------------------------------------------------------------
+10. FILES ADDED AND CHANGED
+--------------------------------------------------------------------------------
+ADDED (this round, uncommitted)
+  src/main/classify/llm-tags.js      describes one file; strict JSON, never eval
+  src/main/search/tag-search.js      query expansion + safe match building
+  src/main/search/tag-indexer.js     the bounded, resumable, cancellable build
+  test/describe.test.js              47 assertions, every model call faked
+
+ADDED (commit 7a74b8e)
+  src/main/system/startup-control.js the only file that writes to the registry
+  src/main/system/process-control.js the only file that ends a process
+  test/startup-control.test.js       39 assertions
+  test/tools/e2e-startup-dupes.js    drives the real app
+
+CHANGED (this round)
+  src/main/db.js            schema v6: file_tags + tag_fts, path-keyed so
+                            descriptions survive a rescan; nine new methods
+  src/main/llm/gemini.js    optional generationConfig (JSON response mode).
+                            Additive — absent for every existing caller.
+  src/main/llm/tools.js     + find_files_by_description, + open_file
+  src/main/llm/agent.js     the two new tool declarations
+  src/main/settings.js      the "describe" section, off by default, clamped
+  src/main/ipc/index.js     seven describe:* channels
+  src/main/app-state.js     lastDescriptionMatches, taggingRun
+  preload.js                the describe bridge
+  src/renderer/js/app.js    the Discover view, its actions and wiring
+  src/renderer/js/settings.js  the describe panel and its controls
+  src/renderer/css/app.css  Discover styling; tags styled as words, not figures
+
+--------------------------------------------------------------------------------
+11. HOW TO TEST IT
+--------------------------------------------------------------------------------
+  npm test                      the whole suite (33 suites; takes a few minutes,
+                                and it launches Electron windows as it goes)
+
+  node test/describe.test.js    just the new feature, 47 assertions, no API calls
+  node test/startup-control.test.js   startup management, 39 assertions
+
+  KNOWN PRE-EXISTING FAILURES, not caused by this work — verified by running the
+  same suite at the previous commit:
+    * test/tools/e2e-overlay.js
+      "revealing a file outside every approved root is refused" fails on Windows.
+      The test builds its "outside" file in os.tmpdir(), which is under
+      C:\Users\<you>, and NexaFiles approves your home folder at launch — so the
+      path IS inside an approved root and the reveal correctly succeeds. The
+      test's premise cannot hold on Windows. It needs to point somewhere
+      genuinely outside home.
+    * test/tools/wake-window.js
+      "and is told the panel is already on screen" is a timing flake; it passes
+      on some runs.
+    * npm test exits 0 even when suites fail. The summary counts failures but
+      the exit code does not reflect them. Worth fixing before any CI use.
+
+================================================================================

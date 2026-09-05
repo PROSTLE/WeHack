@@ -37,6 +37,27 @@ const state = {
   background: null,
   backgroundFilter: 'all',
   system: null,
+
+  // Describe-to-find. `describe` is the status of the description index,
+  // `describeResults` the last search over it. The draft is held here rather
+  // than read off the input so that re-rendering during a build — which happens
+  // on every progress tick — does not wipe what the user is typing.
+  describe: null,
+  describeQuery: '',
+  describeResults: null,
+  describeKind: null,
+  describeBuilding: false,
+  describeProgress: null,
+  // Thumbnails already fetched, keyed by path, so re-rendering the result grid
+  // does not ask the operating system for the same picture again.
+  thumbs: new Map(),
+
+  // Connected cloud accounts, the providers that can be connected, and the
+  // sync folders found locally. `cloudDupes` holds the last duplicate search
+  // over the imported indexes.
+  cloud: null,
+  cloudDupes: null,
+  cloudImporting: false,
   quarantine: null,
   scanning: false,
   busy: null,
@@ -141,6 +162,8 @@ async function guard(fn, label) {
 const VIEWS = [
   ['overview', 'disk', 'Overview'],
   ['files', 'folderOpen', 'Files'],
+  ['discover', 'sparkle', 'Discover'],
+  ['cloud', 'cache', 'Cloud'],
   ['duplicates', 'copies', 'Duplicates'],
   ['leftovers', 'layers', 'Leftovers'],
   ['startup', 'power', 'Startup'],
@@ -161,10 +184,11 @@ const VIEWS = [
  */
 async function renderRail() {
   const rail = document.getElementById('rail');
-  const [places, rootsInfo, quarantine] = await Promise.all([
+  const [places, rootsInfo, quarantine, cloudInfo] = await Promise.all([
     explorer.loadPlaces(),
     guard(() => nexa.roots.list(), 'Reading roots'),
     guard(() => nexa.quarantine.list(), 'Reading quarantine'),
+    nexa.locations.cloud().catch(() => null),
   ]);
 
   const qCount = quarantine ? quarantine.items.length : 0;
@@ -203,6 +227,8 @@ async function renderRail() {
       </div>
     </div>
 
+    ${cloudRailGroup(cloudInfo)}
+
     <div class="rail-group">
       <h2>Approved roots</h2>
       ${(rootsInfo?.roots || []).map((r) => `
@@ -223,6 +249,57 @@ const FOLDER_ICONS = {
   Pictures: 'image', Music: 'audio', Videos: 'video', Movies: 'video',
 };
 function folderIcon(name) { return FOLDER_ICONS[name] || 'folder'; }
+
+const CLOUD_ICONS = {
+  onedrive: 'cache', googledrive: 'cache', dropbox: 'archive',
+  icloud: 'cache', box: 'archive',
+};
+
+/**
+ * The sync folders on this machine, under This PC.
+ *
+ * They sit here rather than in Quick access because that is what they are: a
+ * place your files live, alongside the drives. Each says how much of itself is
+ * actually on the disk, because for a sync folder that is usually not the same
+ * as how much it contains — and the gap is the thing worth knowing before you
+ * go looking for space to reclaim.
+ *
+ * Nothing here is signed in to. These are folders the sync clients created,
+ * found by looking for them.
+ */
+function cloudRailGroup(info) {
+  const found = info?.roots || [];
+  if (!found.length) return '';
+
+  return `
+    <div class="rail-group">
+      <h2>Cloud</h2>
+      ${found.map((c) => {
+        const m = c.measured;
+        const online = m && m.placeholderBytes
+          ? `${formatBytes(m.physicalBytes)} of ${formatBytes(m.logicalBytes)} here`
+          : m ? `${formatBytes(m.physicalBytes)} here` : null;
+        return `
+          <button class="rail-item cloud-item" data-cloud="${esc(c.path)}"
+                  title="${esc(c.path)}${m ? `\n${m.placeholders} of ${m.files} file(s) are online-only` : ''}">
+            ${icon(CLOUD_ICONS[c.provider] || 'cache')}
+            <span class="label">${esc(c.label)}</span>
+            ${m && m.placeholders
+              ? `<span class="meta cloud-meta" title="online-only, not on this disk">${
+                  formatNumber(m.placeholders)}&nbsp;☁</span>`
+              : ''}
+          </button>
+          ${online ? `<div class="rail-subnote">${esc(online)}</div>` : ''}`;
+      }).join('')}
+      <p class="rail-note">
+        ${info.scanned
+          ? 'Files marked ☁ are online-only: they are listed here but their bytes ' +
+            'are in the cloud, not on this disk.'
+          : 'Not measured yet. Scan one of these folders to see how much of it is ' +
+            'actually on your disk.'}
+      </p>
+    </div>`;
+}
 
 /** One row in the sidebar tree, with its expanded children beneath it. */
 function placeNode(place, depth, extra = '') {
@@ -282,6 +359,11 @@ function wireRail(rail) {
   });
   rail.querySelectorAll('[data-browse]').forEach((b) => {
     b.addEventListener('click', () => browseTo(b.dataset.browse));
+  });
+  // A sync folder opens in Files like any other place. Browsing it does not
+  // download anything: listing a directory reads names, not contents.
+  rail.querySelectorAll('[data-cloud]').forEach((b) => {
+    b.addEventListener('click', () => browseTo(b.dataset.cloud));
   });
   rail.querySelectorAll('[data-scan-root]').forEach((b) => {
     b.addEventListener('click', (ev) => { ev.stopPropagation(); startScan(b.dataset.scanRoot); });
@@ -447,6 +529,8 @@ function renderAll() {
   switch (state.view) {
     case 'overview':    stage.innerHTML = viewOverview(); break;
     case 'files':       stage.innerHTML = explorer.render(); break;
+    case 'discover':    stage.innerHTML = viewDiscover(); break;
+    case 'cloud':       stage.innerHTML = viewCloud(); break;
     case 'duplicates':  stage.innerHTML = viewDuplicates(); break;
     case 'leftovers':   stage.innerHTML = viewLeftovers(); break;
     case 'startup':     stage.innerHTML = viewStartup(); break;
@@ -657,6 +741,7 @@ function viewOverview() {
       ${caveats}
     </div>
     ${state.summary ? dash.storagePanel(state.summary, { formatBytes }) : ''}
+    ${state.summary ? dash.cloudPanel(state.summary, { formatBytes }) : ''}
 
     ` +
     // ── worth a look ────────────────────────────────────────────────────
@@ -756,6 +841,513 @@ function knownReclaimable() {
     parts.push('regenerate themselves if removed');
   }
   return { known: items > 0, bytes, items, basis: parts.join(', or ') };
+}
+
+// ── discover: find a file by describing it ─────────────────────────────────
+//
+// The one view in NexaFiles that answers a question no measurement can. A photo
+// of a dog on grass called IMG_4821.JPG has nothing on disk connecting it to the
+// words "brown dog" — so a model is shown each picture once, writes down what it
+// sees, and that is what gets searched.
+//
+// Two things have to stay visible for this to be honest, and both are drawn
+// before any result is:
+//   - how many files have actually been described, because anything not
+//     described cannot appear however well it matches; and
+//   - that the words were written by a model rather than measured, which is why
+//     every result says "described by" and every tag is a chip rather than a
+//     figure.
+
+const DESCRIBE_KINDS = [
+  [null, 'Anything'],
+  ['image', 'Pictures'],
+  ['document', 'Documents'],
+  ['code', 'Code'],
+];
+
+const DESCRIBE_EXAMPLES = [
+  'a photo of a dog on grass',
+  'the screenshot with the red error message',
+  'my invoice from last year',
+  'a picture of handwritten notes',
+];
+
+function viewDiscover() {
+  const d = state.describe;
+  if (!d) {
+    return progressBlock() + `
+      <div class="panel"><p class="muted">Reading the description index…</p></div>`;
+  }
+
+  if (!d.enabled) return discoverOffPanel(d);
+
+  const r = state.describeResults;
+  return progressBlock() + `
+    <div class="panel">
+      <header>
+        <h2>Find a file by describing it</h2>
+        <div class="actions">
+          <button class="btn small" id="describe-verify" title="Drop descriptions of files that no longer exist">
+            ${icon('check', { size: 13 })} Verify
+          </button>
+          <button class="btn small" id="describe-folder" ${state.describeBuilding ? 'disabled' : ''}
+                  title="Describe just one folder — much cheaper, and it covers what you actually want">
+            ${icon('folderOpen', { size: 13 })} Describe a folder…
+          </button>
+          <button class="btn small" id="describe-build" ${state.describeBuilding ? 'disabled' : ''}>
+            ${icon('sparkle', { size: 13 })} ${d.indexed.described ? 'Describe more' : 'Describe my files'}
+          </button>
+        </div>
+      </header>
+
+      <div class="describe-search">
+        <span class="describe-icon">${icon('scan', { size: 16 })}</span>
+        <input type="text" id="describe-input" autocomplete="off" spellcheck="false"
+               placeholder="Describe what is in the file — “a photo of a brown dog on grass”"
+               value="${esc(state.describeQuery)}">
+        <button class="btn primary" id="describe-go">${icon('send', { size: 13 })} Find it</button>
+      </div>
+
+      <div class="filter-bar" style="border-top:0;padding-top:8px;margin-top:8px">
+        ${DESCRIBE_KINDS.map(([k, label]) => `
+          <button class="chip-btn" data-describe-kind="${k === null ? '' : k}"
+                  aria-pressed="${state.describeKind === k}">${label}</button>`).join('')}
+        <span class="filter-count">
+          ${formatNumber(d.indexed.described)} file(s) described${
+            d.indexed.lastTaggedAt
+              ? `, last on ${new Date(d.indexed.lastTaggedAt).toLocaleDateString()}`
+              : ''}
+        </span>
+      </div>
+
+      ${!d.indexed.described ? `
+        <div class="panel-note caution">
+          ${icon('caution', { size: 13 })}
+          <strong>Nothing has been described yet, so this search has nothing to
+          look through.</strong>
+          NexaFiles will show each picture to ${esc(d.model)} once and store what it
+          says. One file is one API call, so a run is capped at
+          ${formatNumber(d.settings.maxFilesPerRun)} file(s)${
+            d.scanRoot ? `, and your scan of
+          <span class="mono">${esc(shortenPath(d.scanRoot, 26))}</span> holds far more
+          than that` : ''}.
+          <br><br>
+          <strong>Start with “Describe a folder…”</strong> and pick the one holding
+          what you want to find — Downloads or Pictures, say. That covers what you
+          are actually looking for, instead of spending the whole cap on whatever
+          the disk happens to list first.
+        </div>` : `
+        <div class="panel-note">
+          ${icon('info', { size: 13 })}
+          Only the ${formatNumber(d.indexed.described)} file(s) already described can be
+          found here — a file that has not been described will not appear however well
+          it matches. Descriptions were written by a model that was shown each file;
+          they are not measurements, and they can be wrong.
+        </div>`}
+
+      ${state.describeBuilding ? describeProgressBlock() : ''}
+    </div>
+
+    ${r ? discoverResults(r) : `
+      <div class="panel">
+        <p class="muted" style="margin:0 0 10px">Try describing something:</p>
+        <div class="row" style="flex-wrap:wrap">
+          ${DESCRIBE_EXAMPLES.map((e) => `
+            <button class="chip-btn" data-describe-example="${esc(e)}">${esc(e)}</button>`).join('')}
+        </div>
+      </div>`}`;
+}
+
+/** What the view says before the feature has been switched on. */
+function discoverOffPanel(d) {
+  return `
+    <div class="panel">
+      <header><h2>Find a file by describing it</h2></header>
+      <p class="muted" style="max-width:78ch">
+        Every other search in NexaFiles matches something measured off your disk —
+        a name, a size, the words inside a document. None of them can find a
+        photograph, because nothing written on a photo says what is in it.
+      </p>
+      <p class="muted" style="max-width:78ch">
+        This one can. It shows each picture and document to a model once, stores
+        the words it comes back with, and searches those. Afterwards
+        “a photo of a brown dog on grass” finds <span class="mono">IMG_4821.JPG</span>.
+      </p>
+      <div class="panel-note caution">
+        ${icon('caution', { size: 13 })}
+        <strong>This is the one feature that sends your files to Google.</strong>
+        The pixels of a photo, or the text of a document, go to the Gemini API to
+        be described. Nothing is sent until you switch this on, nothing is sent
+        for a file that has already been described, and you can delete every
+        description afterwards. It is off by default for that reason.
+      </div>
+      ${d.hasKey ? '' : `
+        <div class="panel-note caution">
+          ${icon('caution', { size: 13 })} No Gemini API key is configured yet.
+          Add one in Settings › Assistant first.
+        </div>`}
+      <div class="row" style="margin-top:14px">
+        <button class="btn primary" id="describe-enable" ${d.hasKey ? '' : 'disabled'}>
+          ${icon('sparkle')} Switch it on
+        </button>
+        <button class="btn" data-goto="settings">${icon('gauge')} Open Settings</button>
+      </div>
+    </div>`;
+}
+
+function describeProgressBlock() {
+  const p = state.describeProgress;
+  const done = p ? p.described : 0;
+  const total = p ? p.total : 0;
+  const pct = total ? Math.min(100, Math.round((p.examined / total) * 100)) : 0;
+  return `
+    <div class="progress" style="margin:14px 0 0">
+      <div class="spinner"></div>
+      <div class="progress-text">
+        <div class="progress-counts">
+          Describing… ${formatNumber(done)} done${total ? ` of up to ${formatNumber(total)}` : ''}
+          ${p && p.failed ? ` · ${formatNumber(p.failed)} could not be described` : ''}
+        </div>
+        <div class="progress-current">${esc(p?.current || '')}</div>
+      </div>
+      <span class="describe-pct">${pct}%</span>
+      <button class="btn small" id="describe-cancel">${icon('cancel', { size: 13 })} Stop</button>
+    </div>`;
+}
+
+/** The result grid. Pictures show as pictures; everything else as a row. */
+function discoverResults(r) {
+  if (!r.results.length) {
+    return `
+      <div class="panel">
+        <header><h2>Nothing matched</h2></header>
+        <p class="muted">
+          Searched ${formatNumber(r.indexed.described)} described file(s) for
+          ${r.terms.length ? r.terms.map((t) => `<span class="tag-chip">${esc(t)}</span>`).join(' ') : 'nothing'}.
+        </p>
+        ${r.note ? `<div class="panel-note">${icon('info', { size: 13 })} ${esc(r.note)}</div>` : ''}
+        <div class="panel-note">
+          ${icon('info', { size: 13 })}
+          A file that has not been described cannot be found here. If you expected
+          something specific, describe more files and try again.
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="panel">
+      <header>
+        <h2>${formatNumber(r.results.length)} match(es)</h2>
+        <span class="muted">
+          ${r.expandedBy && r.expandedBy !== 'your words, unexpanded'
+            ? `terms expanded by ${esc(r.expandedBy)}`
+            : 'matched on your words as typed'}
+        </span>
+      </header>
+      <p class="muted" style="margin:-4px 0 0;font-size:12px">
+        Searched for ${r.terms.slice(0, 18).map((t) => `<span class="tag-chip">${esc(t)}</span>`).join(' ')}
+      </p>
+      ${r.note ? `<div class="panel-note">${icon('info', { size: 13 })} ${esc(r.note)}</div>` : ''}
+      ${r.dropped ? `
+        <div class="panel-note">${icon('info', { size: 13 })}
+          ${formatNumber(r.dropped)} match(es) were dropped because the file no longer
+          exists. Press Verify to clean them out of the index.</div>` : ''}
+
+      <div class="find-grid">
+        ${r.results.map((f, i) => `
+          <figure class="find-card" data-find-open="${esc(f.path)}"
+                  title="${esc(f.path)}\n\nDouble-click to open">
+            <div class="find-thumb" data-thumb="${esc(f.path)}">
+              ${state.thumbs.has(f.path)
+                ? `<img src="${state.thumbs.get(f.path)}" alt="">`
+                : `<span class="find-placeholder">${icon(iconForType(f.kind === 'image' ? 'image' : 'document', false), { size: 22 })}</span>`}
+            </div>
+            <figcaption>
+              <div class="find-name">${esc(f.name)}</div>
+              <div class="find-meta">${formatBytes(f.size)} · ${esc(f.kind || 'file')}</div>
+              <div class="find-tags">
+                ${f.matched.slice(0, 6).map((t) => `<span class="tag-chip hit">${esc(t)}</span>`).join('')}
+                ${f.tags.filter((t) => !f.matched.includes(t)).slice(0, 4)
+                  .map((t) => `<span class="tag-chip">${esc(t)}</span>`).join('')}
+              </div>
+              <button class="evidence-toggle" data-evidence="find-${i}">Why this one</button>
+              <div class="evidence" id="find-${i}" hidden>
+                <span class="evidence-label">Described by ${esc(f.describedBy || 'a model')}</span>
+                It matched ${f.matched.length} of your ${r.terms.length} search terms:
+                ${esc(f.matched.join(', ') || 'none directly')}.<br><br>
+                <strong>Everything it was described as:</strong> ${esc(f.tags.join(', '))}
+                <br><br><span class="mono">${esc(f.path)}</span>
+              </div>
+              <div class="find-actions">
+                <button class="btn small" data-find-open-btn="${esc(f.path)}">
+                  ${icon('external', { size: 13 })} Open
+                </button>
+                <button class="icon-btn" data-find-reveal="${esc(f.path)}" title="Show in folder">
+                  ${icon('folderOpen', { size: 14 })}
+                </button>
+              </div>
+            </figcaption>
+          </figure>`).join('')}
+      </div>
+    </div>`;
+}
+
+// ── cloud accounts ─────────────────────────────────────────────────────────
+//
+// Two different things share this view and must not be confused, so the view
+// keeps them visually apart:
+//
+//   * A SYNC FOLDER is on this disk. NexaFiles found it by looking. It needs
+//     no sign-in and no network, and what it can say about a file that has not
+//     been downloaded is only what the filesystem says.
+//   * A CONNECTED ACCOUNT is the provider's own index, read over the network
+//     with a token the user granted. It knows about every file in the account
+//     including ones that were never downloaded — and, the reason it is worth
+//     the trouble, it carries a content hash the provider computed, so
+//     duplicates can be found without transferring a byte.
+
+function viewCloud() {
+  const c = state.cloud;
+  if (!c) {
+    return progressBlock() + `
+      <div class="panel"><p class="muted">Reading cloud accounts…</p></div>`;
+  }
+
+  return progressBlock() + `
+    <div class="panel">
+      <header>
+        <h2>Cloud accounts</h2>
+        ${c.accounts.length ? `
+          <div class="actions">
+            <button class="btn small" id="cloud-dupes">${icon('copies', { size: 13 })} Find duplicates</button>
+          </div>` : ''}
+      </header>
+      <p class="muted" style="max-width:82ch;margin-top:-6px">
+        Connecting an account lets NexaFiles read its <em>index</em> — every file's
+        name, size, date and the content hash the provider itself computed. No file
+        is downloaded. That hash is the point: it makes exact duplicates findable
+        across the whole account without transferring anything, which the sync
+        folder on your disk can never do, because hashing locally needs the bytes.
+      </p>
+      <div class="panel-note">
+        ${icon('shield', { size: 13 })}
+        NexaFiles asks for <strong>read-only</strong> access and nothing else. There
+        is no code path here that can rename, move or delete anything in your cloud,
+        because the token it holds is not permitted to.
+        ${c.canStoreCredentials ? '' : `
+          <br><br><strong>This machine has no secure credential store</strong>, so a
+          sign-in cannot be saved — NexaFiles will not write a refresh token in plain
+          text. Connecting is disabled for that reason.`}
+      </div>
+    </div>
+
+    ${c.accounts.length ? `
+      <div class="panel">
+        <header><h2>Connected</h2></header>
+        ${c.accounts.map(cloudAccountRow).join('')}
+      </div>` : ''}
+
+    ${state.cloudDupes ? cloudDuplicatesPanel(state.cloudDupes) : ''}
+
+    <div class="panel">
+      <header><h2>${c.accounts.length ? 'Connect another' : 'Connect an account'}</h2></header>
+      ${c.providers.map((p) => cloudProviderSetup(p, c)).join('')}
+    </div>
+
+    ${c.syncFolders?.length ? `
+      <div class="panel">
+        <header>
+          <h2>Sync folders on this PC</h2>
+          <span class="muted">found by looking, not by signing in</span>
+        </header>
+        <p class="muted" style="margin-top:-6px;max-width:80ch">
+          These are already scannable without connecting anything. What they cannot
+          tell you is what is inside a file that has not been downloaded, or how full
+          the account is — those need a connected account.
+        </p>
+        ${c.syncFolders.map((f) => `
+          <div class="plan-row">
+            <span>${icon('folder')}</span>
+            <div class="stack">
+              <span class="plan-name">${esc(f.label)}</span>
+              <span class="plan-path">${esc(f.path)}</span>
+            </div>
+            <button class="btn small" data-browse-cloud="${esc(f.path)}">
+              ${icon('folderOpen', { size: 13 })} Open
+            </button>
+          </div>`).join('')}
+      </div>` : ''}`;
+}
+
+function cloudAccountRow(a) {
+  const q = a.quota;
+  const pct = q && q.totalBytes ? Math.round((q.usedBytes / q.totalBytes) * 100) : null;
+  return `
+    <div class="plan-row">
+      <span>${icon('cache')}</span>
+      <div class="stack">
+        <span class="plan-name">
+          ${esc(a.displayName || a.email || a.label)}
+          <span class="chip">${esc(a.label)}</span>
+          ${a.needsReauth ? '<span class="chip caution-chip">sign in again</span>' : ''}
+        </span>
+        <span class="plan-path">${esc(a.email || '')}</span>
+        <span class="plan-reason">
+          ${a.fileCount
+            ? `${formatNumber(a.fileCount)} file(s) indexed${
+                a.lastImportAt ? `, last on ${new Date(a.lastImportAt).toLocaleDateString()}` : ''}`
+            : 'Not imported yet — press Import to read the account index.'}
+          ${q && q.totalBytes
+            ? ` · ${formatBytes(q.usedBytes)} of ${formatBytes(q.totalBytes)} used${
+                pct !== null ? ` (${pct}%)` : ''}`
+            : q && q.usedBytes ? ` · ${formatBytes(q.usedBytes)} used` : ''}
+        </span>
+      </div>
+      <button class="btn small" data-cloud-import="${esc(a.id)}"
+              ${state.cloudImporting ? 'disabled' : ''}>
+        ${icon('download', { size: 13 })} ${a.fileCount ? 'Re-import' : 'Import'}
+      </button>
+      <button class="btn small" data-cloud-disconnect="${esc(a.id)}">
+        ${icon('x', { size: 13 })} Disconnect
+      </button>
+    </div>`;
+}
+
+/**
+ * One provider, ready to sign in to.
+ *
+ * When this build already carries a client id — from config.js or the
+ * environment — the whole subject disappears and this is a sign-in button, the
+ * same as any other application with a "Sign in with Google". The setup half
+ * appears only when there is nothing to sign in with, because a client id is
+ * something whoever builds NexaFiles supplies once, not something every user
+ * should have to think about.
+ */
+function cloudProviderSetup(p, c) {
+  const connected = c.accounts.filter((a) => a.provider === p.id);
+  const ready = !!p.clientId;
+  const canConnect = ready && c.canStoreCredentials;
+
+  const signInButton = `
+    <button class="btn primary" data-cloud-signin="${esc(p.id)}"
+            ${canConnect ? '' : 'disabled'}
+            title="${canConnect
+              ? `Opens your browser to sign in to ${esc(p.label)}`
+              : 'Not configured yet'}">
+      ${icon('external', { size: 13 })} Sign in with ${esc(p.label)}
+    </button>`;
+
+  if (ready) {
+    return `
+      <div class="cloud-setup">
+        <div class="cloud-setup-head">
+          <strong>${esc(p.label)}</strong>
+          ${connected.length ? `<span class="chip">${connected.length} connected</span>` : ''}
+        </div>
+        <p class="muted" style="margin:4px 0 10px;font-size:12px;max-width:78ch">
+          You will sign in on ${esc(p.label)}'s own page, in your browser — not in
+          a window this application controls. NexaFiles asks for read-only access
+          and receives no password.
+        </p>
+        <div class="row">
+          ${signInButton}
+          <button class="btn quiet small" data-cloud-show-setup="${esc(p.id)}">
+            ${icon('gauge', { size: 12 })} Use a different client ID
+          </button>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="cloud-setup">
+      <div class="cloud-setup-head">
+        <strong>${esc(p.label)}</strong>
+        ${connected.length ? `<span class="chip">${connected.length} connected</span>` : ''}
+      </div>
+      <p class="muted" style="margin:4px 0 8px;font-size:12px;max-width:78ch">
+        This copy of NexaFiles was not built with a ${esc(p.label)} client ID, so
+        one has to be supplied before anyone can sign in. It is a one-time step for
+        whoever set this copy up — not something each person using it needs to
+        repeat. ${esc(p.registerHint)}
+      </p>
+      <div class="set-input-row">
+        <input type="text" class="set-input mono" spellcheck="false" autocomplete="off"
+               data-cloud-clientid="${esc(p.id)}"
+               placeholder="Client ID" value="">
+        <button class="btn" data-cloud-save-id="${esc(p.id)}">${icon('check', { size: 13 })} Save</button>
+        ${signInButton}
+      </div>
+      <p class="set-hint">
+        A client ID is not a secret — it names the application, not you, and every
+        app with a “Sign in with ${esc(p.label)}” button ships one openly. There is
+        no secret half to paste: desktop apps cannot keep one, which is what PKCE
+        replaces. Put it in <span class="mono">config.js</span> to make this step
+        disappear for good.
+        <a href="#" data-open-external="${esc(p.registerAt)}">Where to register one</a>
+      </p>
+    </div>`;
+}
+
+function cloudDuplicatesPanel(d) {
+  return `
+    <div class="panel">
+      <header>
+        <h2>Duplicates in the cloud</h2>
+        <span class="muted">${formatNumber(d.groups.length)} group(s),
+          ${formatBytes(d.totalWasted)} reclaimable</span>
+      </header>
+      <div class="panel-note">${icon('info', { size: 13 })} ${esc(d.method)}</div>
+      ${d.stats.nativeDocs ? `
+        <div class="panel-note">
+          ${icon('info', { size: 13 })}
+          ${formatNumber(d.stats.nativeDocs)} Google Docs, Sheets or Slides file(s)
+          are in the index but cannot take part: they are not stored blobs, so the
+          provider publishes no size and no hash for them.
+        </div>` : ''}
+      ${!d.groups.length ? '<p class="muted">No duplicates found among the hashed files.</p>' : `
+        <div class="list-scroll" style="margin-top:12px">
+          <table class="table">
+            <thead><tr><th>File</th><th class="num">Size</th><th class="num">Copies</th></tr></thead>
+            <tbody>
+              ${d.groups.slice(0, 60).map((g, i) => `
+                <tr class="dupe-group-head">
+                  <td colspan="3">
+                    <span class="dupe-group-n">Group ${i + 1}</span>
+                    <span class="dupe-group-meta">${formatNumber(g.n)} copies —
+                      ${formatBytes(g.wastedBytes)} reclaimable, matched on
+                      ${esc(g.hashAlgorithm)}</span>
+                  </td>
+                </tr>
+                ${g.members.map((m, j) => `
+                  <tr>
+                    <td>
+                      <div class="name">${esc(m.name)}
+                        ${j === 0 ? '<span class="chip">oldest</span>' : ''}</div>
+                      <div class="path" title="${esc(m.parentPath || '')}">${
+                        esc(m.parentPath || m.provider)}</div>
+                    </td>
+                    <td class="num bytes">${formatBytes(m.size)}</td>
+                    <td class="num">
+                      ${m.webUrl
+                        ? `<button class="icon-btn" data-open-external="${esc(m.webUrl)}"
+                             title="Open in the browser">${icon('external', { size: 14 })}</button>`
+                        : ''}
+                    </td>
+                  </tr>`).join('')}`).join('')}
+            </tbody>
+          </table>
+        </div>`}
+      ${d.alsoOnThisPc?.length ? `
+        <div class="panel-note caution" style="margin-top:12px">
+          ${icon('caution', { size: 13 })}
+          <strong>${formatNumber(d.alsoOnThisPc.length)} of these also appear on this
+          PC by name and size.</strong>
+          Only the ones the provider hashes with SHA-256 can be confirmed identical;
+          the rest are a name-and-size coincidence until checked. Nothing here is
+          proposed for removal — a cloud copy and a local copy are not the same
+          file, and deleting either is a separate decision.
+        </div>` : ''}
+    </div>`;
 }
 
 // ── duplicates ─────────────────────────────────────────────────────────────
@@ -2110,6 +2702,110 @@ function wireStage() {
     tr.addEventListener('dblclick', () => openDuplicate(tr.dataset.dupeFile));
   });
 
+  // ── cloud ───────────────────────────────────────────────────────────────
+  stage.querySelectorAll('[data-cloud-save-id]').forEach((b) => {
+    b.addEventListener('click', () => saveCloudClientId(b.dataset.cloudSaveId));
+  });
+  stage.querySelectorAll('[data-cloud-clientid]').forEach((f) => {
+    f.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); saveCloudClientId(f.dataset.cloudClientid); }
+    });
+  });
+  stage.querySelectorAll('[data-cloud-signin]').forEach((b) => {
+    b.addEventListener('click', () => cloudSignIn(b.dataset.cloudSignin));
+  });
+  stage.querySelectorAll('[data-cloud-import]').forEach((b) => {
+    b.addEventListener('click', () => cloudImport(b.dataset.cloudImport));
+  });
+  stage.querySelectorAll('[data-cloud-disconnect]').forEach((b) => {
+    b.addEventListener('click', () => cloudDisconnect(b.dataset.cloudDisconnect));
+  });
+  stage.querySelector('#cloud-dupes')?.addEventListener('click', cloudFindDuplicates);
+  // Overriding a client id the build already carries: rare, so it is behind a
+  // link rather than occupying the panel for everyone.
+  stage.querySelectorAll('[data-cloud-show-setup]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const p = state.cloud?.providers.find((x) => x.id === b.dataset.cloudShowSetup);
+      if (!p) return;
+      const entered = window.prompt(
+        `Client ID for ${p.label}\n\n` +
+        `This copy currently uses one from ${p.clientIdSource || 'its build'}. ` +
+        'Enter a different one to override it, or clear the box to go back to that one.',
+        p.clientId || '');
+      if (entered === null) return;
+      const key = p.id === 'google' ? 'googleClientId' : 'microsoftClientId';
+      guard(() => nexa.settings.set({ cloud: { [key]: entered.trim() } }), 'Saving the client ID')
+        .then(async (updated) => {
+          if (!updated) return;
+          state.prefs = updated;
+          settings.state.settings = updated;
+          await loadCloud();
+          renderAll();
+          toast(entered.trim() ? 'Client ID saved.' : 'Reverted to the built-in client ID.');
+        });
+    });
+  });
+  stage.querySelectorAll('[data-browse-cloud]').forEach((b) => {
+    b.addEventListener('click', () => browseTo(b.dataset.browseCloud));
+  });
+  // A link to a provider's console opens in the real browser, never in a window
+  // this application controls.
+  stage.querySelectorAll('[data-open-external]').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      nexa.shell.openExternal(b.dataset.openExternal).catch(() => {});
+    });
+  });
+
+  // ── discover ────────────────────────────────────────────────────────────
+  stage.querySelector('#describe-enable')?.addEventListener('click', enableDescribe);
+  stage.querySelector('#describe-build')?.addEventListener('click', () => buildDescriptions());
+  stage.querySelector('#describe-folder')?.addEventListener('click', describeFolder);
+  stage.querySelector('#describe-cancel')?.addEventListener('click', () => {
+    nexa.describe.cancel().catch(() => {});
+    toast('Stopping after the file being described now.');
+  });
+  stage.querySelector('#describe-verify')?.addEventListener('click', verifyDescriptions);
+  stage.querySelector('#describe-go')?.addEventListener('click', runDescribeSearch);
+
+  const input = stage.querySelector('#describe-input');
+  if (input) {
+    // The draft lives in state, not in the DOM: a progress tick re-renders this
+    // view, and a value read off the element would be lost every second.
+    input.addEventListener('input', () => { state.describeQuery = input.value; });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); runDescribeSearch(); }
+    });
+    if (state.view === 'discover' && !state.describeBuilding) {
+      const at = input.value.length;
+      input.focus();
+      input.setSelectionRange(at, at);
+    }
+  }
+  stage.querySelectorAll('[data-describe-kind]').forEach((b) => {
+    b.addEventListener('click', () => {
+      state.describeKind = b.dataset.describeKind || null;
+      renderAll();
+      if (state.describeQuery.trim()) runDescribeSearch();
+    });
+  });
+  stage.querySelectorAll('[data-describe-example]').forEach((b) => {
+    b.addEventListener('click', () => {
+      state.describeQuery = b.dataset.describeExample;
+      runDescribeSearch();
+    });
+  });
+  stage.querySelectorAll('[data-find-open-btn]').forEach((b) => {
+    b.addEventListener('click', (e) => { e.stopPropagation(); openDuplicate(b.dataset.findOpenBtn); });
+  });
+  stage.querySelectorAll('[data-find-reveal]').forEach((b) => {
+    b.addEventListener('click', (e) => { e.stopPropagation(); revealDuplicate(b.dataset.findReveal); });
+  });
+  stage.querySelectorAll('[data-find-open]').forEach((c) => {
+    c.addEventListener('dblclick', () => openDuplicate(c.dataset.findOpen));
+  });
+  if (state.view === 'discover') loadThumbnails(stage);
+
   stage.querySelector('#find-leftovers')?.addEventListener('click', runLeftovers);
   stage.querySelector('#leftover-plan')?.addEventListener('click', () => buildPlan('leftovers'));
   stage.querySelector('#load-startup')?.addEventListener('click', loadStartup);
@@ -2428,6 +3124,255 @@ async function revealDuplicate(filePath) {
   if (!filePath) return;
   const ok = await guard(() => nexa.explorer.reveal(filePath), 'Showing the file');
   if (ok) toast('Opened its folder.');
+}
+
+// ── cloud accounts ─────────────────────────────────────────────────────────
+
+async function loadCloud() {
+  state.cloud = await guard(() => nexa.cloud.providers(), 'Reading cloud accounts');
+}
+
+async function saveCloudClientId(providerId) {
+  const field = document.querySelector(`[data-cloud-clientid="${providerId}"]`);
+  if (!field) return;
+  const key = providerId === 'google' ? 'googleClientId' : 'microsoftClientId';
+  const updated = await guard(
+    () => nexa.settings.set({ cloud: { [key]: field.value.trim() } }), 'Saving the client ID');
+  if (!updated) return;
+  state.prefs = updated;
+  settings.state.settings = updated;
+  await loadCloud();
+  renderAll();
+  toast(field.value.trim() ? 'Client ID saved. You can sign in now.' : 'Client ID cleared.');
+}
+
+/**
+ * Signs in.
+ *
+ * The browser that opens is the system's, not a window this application
+ * controls — a password typed into a window the app owns is a password the app
+ * could read, and the user has no address bar to check. So the toast says to go
+ * and look at the browser, because the app cannot show what is happening there.
+ */
+async function cloudSignIn(providerId) {
+  toast('Your browser is opening. Finish signing in there, then come back.');
+  state.busy = 'Waiting for the sign-in to finish in your browser…';
+  renderAll();
+
+  const out = await guard(() => nexa.cloud.signIn(providerId), 'Signing in');
+  state.busy = null;
+  await loadCloud();
+  renderAll();
+  if (out) {
+    toast(`Connected to ${out.account.label} as ${out.account.email || 'that account'}. ` +
+      'Press Import to read its index.');
+  }
+}
+
+/**
+ * Imports an account's index.
+ *
+ * The toast is explicit that nothing is downloaded, because "importing my
+ * Google Drive" is a phrase that reasonably sounds like it means the files.
+ */
+async function cloudImport(accountId) {
+  if (state.cloudImporting) return;
+  state.cloudImporting = true;
+  state.busy = 'Reading the account index — no files are being downloaded…';
+  renderAll();
+
+  const out = await guard(() => nexa.cloud.import(accountId), 'Importing');
+  state.cloudImporting = false;
+  state.busy = null;
+  await loadCloud();
+
+  if (out) {
+    toast(out.complete
+      ? `Indexed ${formatNumber(out.stats.files)} file(s); ` +
+        `${formatNumber(out.stats.hashed)} carry a hash the provider computed.`
+      : out.note || 'Import stopped early.');
+  }
+  renderAll();
+}
+
+async function cloudFindDuplicates() {
+  state.busy = 'Matching on the hashes the providers published…';
+  renderAll();
+  const out = await guard(() => nexa.cloud.duplicates({ minBytes: 1 }), 'Cloud duplicates');
+  state.busy = null;
+  if (out) {
+    state.cloudDupes = out;
+    toast(out.groups.length
+      ? `${out.groups.length} group(s), ${formatBytes(out.totalWasted)} reclaimable — ` +
+        'found without downloading anything.'
+      : 'No duplicates among the hashed files.');
+  }
+  renderAll();
+}
+
+async function cloudDisconnect(accountId) {
+  const account = state.cloud?.accounts.find((a) => a.id === accountId);
+  const ok = window.confirm(
+    `Disconnect ${account?.email || 'this account'}?\n\n` +
+    'The stored credentials and the imported index are removed from this machine.\n\n' +
+    'This does NOT revoke access at the provider — only they can do that. If you ' +
+    'want it withdrawn there too, do it in your account security settings.');
+  if (!ok) return;
+
+  const out = await guard(() => nexa.cloud.disconnect(accountId), 'Disconnecting');
+  if (!out) return;
+  state.cloudDupes = null;
+  await loadCloud();
+  renderAll();
+  toast(`Disconnected. ${formatNumber(out.removedFiles)} indexed record(s) removed ` +
+    'from this machine.');
+}
+
+// ── discover: describing files, and searching the descriptions ─────────────
+
+async function loadDescribeStatus() {
+  state.describe = await guard(() => nexa.describe.status(), 'Description index');
+}
+
+/**
+ * Switches the feature on.
+ *
+ * Confirmed rather than toggled, because the thing being agreed to is not "a
+ * setting changed" — it is "my files may be sent to Google". The dialog says
+ * that in those words.
+ */
+async function enableDescribe() {
+  const ok = window.confirm(
+    'Switch on describing files?\n\n' +
+    'NexaFiles will send each picture and document you choose to describe to the ' +
+    'Gemini API, and store the words that come back so you can search them.\n\n' +
+    'Nothing is sent until you press "Describe my files", nothing is sent twice ' +
+    'for the same unchanged file, and you can delete every description afterwards ' +
+    'from Settings.');
+  if (!ok) return;
+
+  const updated = await guard(
+    () => nexa.settings.set({ describe: { enabled: true } }), 'Switching it on');
+  if (!updated) return;
+  state.prefs = updated;
+  settings.state.settings = updated;
+  await loadDescribeStatus();
+  renderAll();
+  toast('Describing is on. Nothing has been sent yet — press "Describe my files".');
+}
+
+/**
+ * Describes files, showing progress while it runs.
+ *
+ * The button is disabled for the duration rather than queued: a second build
+ * over the same candidates would spend a second set of API calls on files the
+ * first is already paying for.
+ */
+/**
+ * Describes one folder rather than everything.
+ *
+ * The important option, not a convenience. A run is capped at a couple of
+ * hundred API calls; a scan can hold a million files. Pointing the run at the
+ * folder holding what you want is the difference between finding it and
+ * spending the whole cap somewhere else entirely.
+ */
+async function describeFolder() {
+  const picked = await guard(
+    () => nexa.roots.pick('Describe the files in which folder?'), 'Choosing a folder');
+  if (!picked?.path) return;
+  await buildDescriptions(picked.path);
+}
+
+async function buildDescriptions(under = null) {
+  if (state.describeBuilding) return;
+  const cap = state.describe?.settings?.maxFilesPerRun ?? 200;
+  const where = under
+    ? `the files in ${shortenPath(under, 44)}`
+    : 'files from across your last scan';
+  const ok = window.confirm(
+    `Describe up to ${cap} of ${where}?\n\n` +
+    'Each one is a separate call to the Gemini API, and each sends that file. ' +
+    'Pictures are described first, then the most recently changed files.\n\n' +
+    'Files already described are skipped, so running this again only pays for ' +
+    'what is new. You can stop it at any point and keep what it has done.');
+  if (!ok) return;
+
+  state.describeBuilding = true;
+  state.describeProgress = null;
+  renderAll();
+
+  const out = await guard(() => nexa.describe.build({ under }), 'Describing files');
+
+  state.describeBuilding = false;
+  state.describeProgress = null;
+  await loadDescribeStatus();
+
+  if (out) {
+    toast(out.complete
+      ? `Described ${formatNumber(out.described)} file(s).` +
+        (out.failed ? ` ${formatNumber(out.failed)} could not be described.` : '')
+      : `Stopped after ${formatNumber(out.described)} file(s) — ${out.stoppedBy}. ` +
+        'Run it again to carry on.');
+  }
+  renderAll();
+}
+
+async function verifyDescriptions() {
+  const out = await guard(() => nexa.describe.verify(), 'Verifying the index');
+  if (!out) return;
+  await loadDescribeStatus();
+  renderAll();
+  toast(out.removed
+    ? `Dropped ${formatNumber(out.removed)} description(s) of files that are gone.`
+    : 'Every described file is still where it was.');
+}
+
+/** Runs the description search and draws the results. */
+async function runDescribeSearch() {
+  const query = state.describeQuery.trim();
+  if (!query) { toast('Describe what you are looking for first.'); return; }
+
+  state.busy = 'Matching your description…';
+  renderAll();
+
+  const res = await guard(
+    () => nexa.describe.search(query, { kind: state.describeKind, limit: 60 }),
+    'Searching by description');
+
+  state.busy = null;
+  if (res) {
+    state.describeResults = res;
+    toast(res.results.length
+      ? `${res.results.length} match(es).`
+      : 'Nothing described so far matches that.');
+  }
+  renderAll();
+}
+
+/**
+ * Fills in the result thumbnails after the grid is on screen.
+ *
+ * Asked for one at a time and cached, because the grid re-renders whenever
+ * anything else on the view changes and re-fetching sixty thumbnails each time
+ * would make the view stutter for no gain.
+ */
+async function loadThumbnails(scope) {
+  const wanted = [...scope.querySelectorAll('[data-thumb]')]
+    .map((el) => el.dataset.thumb)
+    .filter((p) => !state.thumbs.has(p));
+
+  for (const filePath of wanted.slice(0, 80)) {
+    let data = null;
+    try {
+      data = await nexa.explorer.thumbnail(filePath, 160);
+    } catch { /* no provider for this type; the placeholder icon stands */ }
+    state.thumbs.set(filePath, data);
+    if (!data) continue;
+    // Written straight into the DOM rather than by re-rendering: sixty
+    // re-renders while thumbnails trickle in would fight everything else.
+    const host = document.querySelector(`[data-thumb="${CSS.escape(filePath)}"]`);
+    if (host) host.innerHTML = `<img src="${data}" alt="">`;
+  }
 }
 
 // ── startup and background load ────────────────────────────────────────────
@@ -2946,6 +3891,27 @@ async function boot() {
     if (current && p.current) current.textContent = p.current;
   });
 
+  // Files being described, while it happens. Only the two lines inside the
+  // progress bar are rewritten — the same reason the assistant's stage line is
+  // patched rather than re-rendered: a full render every file would take the
+  // focus out of the search box the user is typing into.
+  nexa.describe.onProgress((p) => {
+    if (!state.describeBuilding) return;
+    state.describeProgress = p;
+    if (state.view !== 'discover') return;
+    const counts = document.querySelector('.progress-counts');
+    const current = document.querySelector('.progress-current');
+    const pct = document.querySelector('.describe-pct');
+    if (counts) {
+      counts.textContent =
+        `Describing… ${formatNumber(p.described)} done` +
+        (p.total ? ` of up to ${formatNumber(p.total)}` : '') +
+        (p.failed ? ` · ${formatNumber(p.failed)} could not be described` : '');
+    }
+    if (current) current.textContent = p.current || '';
+    if (pct && p.total) pct.textContent = `${Math.min(100, Math.round((p.examined / p.total) * 100))}%`;
+  });
+
   // What the assistant is doing, while it does it. Only the one line inside the
   // pending bubble is rewritten: re-rendering the whole panel on every progress
   // tick would fight the caret in the composer, which is exactly the bug the
@@ -2999,7 +3965,7 @@ async function boot() {
   await loadProfile();
   state.scan = await guard(() => nexa.scan.current(), 'Reading last scan');
   if (state.scan) await loadComposition(state.scan.root);
-  await Promise.all([loadSummary(), loadSession()]);
+  await Promise.all([loadSummary(), loadSession(), loadDescribeStatus(), loadCloud()]);
   await refreshQuarantine();
   await renderRail();
   renderAll();

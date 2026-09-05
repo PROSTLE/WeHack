@@ -11,7 +11,7 @@
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 9;
 
 class Index {
   constructor(dbPath) {
@@ -248,6 +248,128 @@ class Index {
         )
       `);
       d.exec(`CREATE INDEX IF NOT EXISTS idx_bodies_fresh ON doc_bodies(pathKey, size, mtimeMs)`);
+    }
+
+    if (current < 6) {
+      // Described content: what a file is *about*, in words, so that it can be
+      // found by describing it rather than by naming it.
+      //
+      // This is the one index in NexaFiles whose contents did not come from
+      // measuring the disk — the words are written by a model that was shown
+      // the file. That makes it categorically different from every other table
+      // here, and the difference is carried in the data rather than assumed:
+      // `model` records which model produced the tags and `taggedAt` when, so
+      // a tag can always be attributed, and `ok`/`note` record the files that
+      // were looked at and could not be described, because "no tags" and
+      // "never examined" are not the same answer.
+      //
+      // Keyed on path rather than on a scan, like doc_bodies and for the same
+      // reason: describing a file costs an API call, so the work must survive
+      // a rescan. `size` and `mtimeMs` are the freshness key — a file that has
+      // changed since it was described is re-described automatically, and one
+      // that has not is never paid for twice.
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS file_tags (
+          rowid      INTEGER PRIMARY KEY,
+          pathKey    TEXT NOT NULL UNIQUE,
+          path       TEXT NOT NULL,
+          name       TEXT NOT NULL,
+          extension  TEXT,
+          category   TEXT,
+          kind       TEXT,
+          size       INTEGER NOT NULL,
+          mtimeMs    REAL NOT NULL,
+          tags       TEXT NOT NULL DEFAULT '[]',
+          tagCount   INTEGER NOT NULL DEFAULT 0,
+          model      TEXT,
+          ok         INTEGER NOT NULL DEFAULT 1,
+          note       TEXT,
+          taggedAt   TEXT NOT NULL
+        )
+      `);
+      d.exec(`CREATE INDEX IF NOT EXISTS idx_tags_fresh ON file_tags(pathKey, size, mtimeMs)`);
+      d.exec(`CREATE INDEX IF NOT EXISTS idx_tags_kind  ON file_tags(kind)`);
+
+      // The words themselves, in SQLite's own full-text index, joined to
+      // file_tags on rowid — the same two-table shape doc_fts/doc_bodies uses,
+      // for the same reason: an FTS5 table cannot carry a useful key of its own.
+      d.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS tag_fts USING fts5(
+          tags,
+          name,
+          tokenize = 'porter unicode61 remove_diacritics 2'
+        )
+      `);
+    }
+
+    if (current < 7) {
+      // How much of a file's reported size is actually on this disk.
+      //
+      // A file inside OneDrive, Google Drive or Dropbox can report its full
+      // size while occupying nothing at all — Windows calls it Files On-Demand,
+      // and the bytes only arrive when something reads them. Recording the two
+      // figures separately is what lets NexaFiles keep its central claim
+      // honest: `size` answers "how big is this file", `physicalSize` answers
+      // "how much of my disk is it using", and for a placeholder those differ
+      // by the whole file.
+      //
+      // Added as columns rather than a side table because every row needs them
+      // and they come free from the stat the walker already performs.
+      for (const [col, decl] of [
+        ['physicalSize', 'INTEGER'],
+        ['cloudProvider', 'TEXT'],
+        ['cloudPlaceholder', 'INTEGER NOT NULL DEFAULT 0'],
+        // A file on a mounted virtual drive (Google Drive's G:). Distinct from a
+        // placeholder: a placeholder is measurably absent, whereas this one's
+        // local footprint is not knowable at all, because the driver reports
+        // every file as fully allocated whether it is cached or not. Both mean
+        // "reading this may download it", which is what the guards check.
+        ['cloudStreamed', 'INTEGER NOT NULL DEFAULT 0'],
+      ]) {
+        if (!this._hasColumn('files', col)) {
+          d.exec(`ALTER TABLE files ADD COLUMN ${col} ${decl}`);
+        }
+      }
+      d.exec(`CREATE INDEX IF NOT EXISTS idx_files_cloud ON files(scanId, cloudPlaceholder)`);
+    }
+
+    if (current < 8) {
+      // Files that live in a connected cloud account.
+      //
+      // Kept apart from `files` on purpose. Every row in `files` is something
+      // this machine walked and measured; a row here was described to us over
+      // the network by a provider, and was never seen. Mixing them would put
+      // unmeasured sizes into totals that the whole application presents as
+      // measured, and there would be no way afterwards to tell which was which.
+      //
+      // `hash` and `hashAlgorithm` are the reason this table earns its place:
+      // the provider computed them, so duplicates can be found across a cloud
+      // account without downloading anything. The algorithm is stored beside
+      // the value because a Google MD5 and a local SHA-256 are not comparable
+      // and must never be joined as though they were.
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS cloud_files (
+          id            INTEGER PRIMARY KEY,
+          accountId     TEXT NOT NULL,
+          provider      TEXT NOT NULL,
+          remoteId      TEXT NOT NULL,
+          name          TEXT NOT NULL,
+          mimeType      TEXT,
+          size          INTEGER,
+          hash          TEXT,
+          hashAlgorithm TEXT,
+          modifiedAt    TEXT,
+          createdAt     TEXT,
+          webUrl        TEXT,
+          parentPath    TEXT,
+          isNativeDoc   INTEGER NOT NULL DEFAULT 0,
+          importedAt    TEXT NOT NULL,
+          UNIQUE(accountId, remoteId)
+        )
+      `);
+      d.exec(`CREATE INDEX IF NOT EXISTS idx_cloud_account ON cloud_files(accountId)`);
+      d.exec(`CREATE INDEX IF NOT EXISTS idx_cloud_hash    ON cloud_files(hashAlgorithm, hash)`);
+      d.exec(`CREATE INDEX IF NOT EXISTS idx_cloud_size    ON cloud_files(size)`);
     }
 
     d.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`)
@@ -571,6 +693,145 @@ class Index {
     return removed;
   }
 
+  // ── described content ────────────────────────────────────────────────────
+  //
+  // Unlike everything above, these words were not measured off the disk — they
+  // were written by a model that was shown the file. Every row therefore
+  // carries which model wrote it and when, and a file that was examined and
+  // could not be described is stored with `ok = 0` and the reason, so that
+  // "nothing matched" is never confused with "never looked at".
+
+  /** True when this exact file, at this size and time, has already been described. */
+  fileTagsFresh(pathKey, size, mtimeMs) {
+    const row = this.db.prepare(
+      `SELECT rowid FROM file_tags WHERE pathKey = ? AND size = ? AND mtimeMs = ?`
+    ).get(pathKey, size, mtimeMs);
+    return !!row;
+  }
+
+  /**
+   * Stores one file's description.
+   *
+   * Replaces any previous description of the same path outright: a file that
+   * has changed is a different file, and merging old tags into new ones would
+   * leave the index asserting things about content that no longer exists.
+   */
+  putFileTags({
+    pathKey, path: filePath, name, extension, category, kind,
+    size, mtimeMs, tags, model, ok, note,
+  }) {
+    const key = pathKey || filePath;
+    const list = Array.isArray(tags) ? tags : [];
+    const existing = this.db.prepare(`SELECT rowid FROM file_tags WHERE pathKey = ?`).get(key);
+    if (existing) {
+      this.db.prepare(`DELETE FROM tag_fts WHERE rowid = ?`).run(existing.rowid);
+      this.db.prepare(`DELETE FROM file_tags WHERE rowid = ?`).run(existing.rowid);
+    }
+    const info = this.db.prepare(
+      `INSERT INTO tag_fts (tags, name) VALUES (?, ?)`
+    ).run(ok ? list.join(' ') : '', name);
+    this.db.prepare(`
+      INSERT INTO file_tags
+        (rowid, pathKey, path, name, extension, category, kind,
+         size, mtimeMs, tags, tagCount, model, ok, note, taggedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(Number(info.lastInsertRowid), key, filePath, name,
+           extension || null, category || null, kind || null,
+           size, mtimeMs, JSON.stringify(list), list.length,
+           model || null, ok ? 1 : 0, note || null, new Date().toISOString());
+    return Number(info.lastInsertRowid);
+  }
+
+  /**
+   * Finds files whose description matches.
+   *
+   * Ranked by bm25 over the tag bag, with the file's own name weighted lower
+   * than its tags — the whole point of this index is to find a photo whose
+   * name is `IMG_4821.JPG`, so a name match is a bonus rather than the signal.
+   *
+   * `kind` and `extensions` narrow by what the file *is*, which is measured
+   * rather than described, so a query for a picture cannot return a spreadsheet
+   * however well its words happen to match.
+   */
+  searchFileTags(matchExpression, { limit = 40, kind = null, extensions = null } = {}) {
+    const clauses = [`tag_fts MATCH ?`, `t.ok = 1`];
+    const args = [matchExpression];
+    if (kind) { clauses.push(`t.kind = ?`); args.push(kind); }
+    if (Array.isArray(extensions) && extensions.length) {
+      clauses.push(`t.extension IN (${extensions.map(() => '?').join(',')})`);
+      args.push(...extensions.map((e) => String(e).replace(/^\./, '').toLowerCase()));
+    }
+    args.push(Math.min(Math.max(1, limit), 200));
+    return this.db.prepare(`
+      SELECT t.path, t.name, t.extension, t.category, t.kind, t.size, t.mtimeMs,
+             t.tags, t.model, t.taggedAt,
+             bm25(tag_fts, 4.0, 1.0) AS rank
+      FROM tag_fts
+      JOIN file_tags t ON t.rowid = tag_fts.rowid
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY rank
+      LIMIT ?
+    `).all(...args);
+  }
+
+  /** One file's description, for showing why it was returned. */
+  fileTagsFor(pathKey) {
+    return this.db.prepare(
+      `SELECT * FROM file_tags WHERE pathKey = ?`
+    ).get(pathKey) || null;
+  }
+
+  /** How much has been described, for an interface that must not overstate it. */
+  tagIndexStats() {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS files,
+             SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS described,
+             SUM(tagCount) AS tags,
+             MAX(taggedAt) AS lastTaggedAt
+      FROM file_tags
+    `).get();
+    const byKind = this.db.prepare(`
+      SELECT kind, COUNT(*) AS n FROM file_tags WHERE ok = 1 GROUP BY kind
+    `).all();
+    return {
+      files: row?.files || 0,
+      described: row?.described || 0,
+      tags: row?.tags || 0,
+      lastTaggedAt: row?.lastTaggedAt || null,
+      byKind: Object.fromEntries(byKind.map((r) => [r.kind || 'other', r.n])),
+    };
+  }
+
+  /** Forgets one file's description. */
+  deleteFileTags(pathKey) {
+    const row = this.db.prepare(`SELECT rowid FROM file_tags WHERE pathKey = ?`).get(pathKey);
+    if (!row) return false;
+    this.db.prepare(`DELETE FROM tag_fts WHERE rowid = ?`).run(row.rowid);
+    this.db.prepare(`DELETE FROM file_tags WHERE rowid = ?`).run(row.rowid);
+    return true;
+  }
+
+  /** Drops descriptions of files that are gone. */
+  pruneFileTags(exists = (p) => require('fs').existsSync(p)) {
+    const rows = this.db.prepare(`SELECT rowid, path FROM file_tags`).all();
+    let removed = 0;
+    for (const r of rows) {
+      if (exists(r.path)) continue;
+      this.db.prepare(`DELETE FROM tag_fts WHERE rowid = ?`).run(r.rowid);
+      this.db.prepare(`DELETE FROM file_tags WHERE rowid = ?`).run(r.rowid);
+      removed++;
+    }
+    return removed;
+  }
+
+  /** Every description, dropped. Used when the feature is switched off. */
+  clearFileTags() {
+    const n = this.db.prepare(`SELECT COUNT(*) AS n FROM file_tags`).get()?.n || 0;
+    this.db.exec(`DELETE FROM tag_fts`);
+    this.db.exec(`DELETE FROM file_tags`);
+    return n;
+  }
+
   /** Forgets every indexed body. The Settings view offers this. */
   clearDocBodies() {
     const n = this.db.prepare(`SELECT COUNT(*) AS n FROM doc_bodies`).get()?.n || 0;
@@ -637,8 +898,9 @@ class Index {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO files
         (scanId, path, name, parent, isDirectory, size, mtimeMs, atimeMs, birthMs,
-         extension, type, category, depth, fileId)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         extension, type, category, depth, fileId,
+         physicalSize, cloudProvider, cloudPlaceholder, cloudStreamed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.db.exec('BEGIN');
     try {
@@ -646,7 +908,20 @@ class Index {
         stmt.run(
           scanId, r.path, r.name, r.parent, r.isDirectory ? 1 : 0, r.size,
           r.mtimeMs, r.atimeMs, r.birthMs, r.extension, r.type, r.category,
-          r.depth, r.fileId
+          r.depth, r.fileId,
+          // `physicalSize` falls back to the logical size rather than to zero:
+          // a platform that does not report allocated blocks has not told us
+          // the file is absent, and defaulting to zero would invent that claim.
+          // A streamed file's footprint is genuinely unknown, so NULL survives
+          // rather than being filled in with its logical size — which would put
+          // an invented number into a column the interface reports as measured.
+          r.cloudStreamed
+            ? null
+            : (r.physicalSize === undefined || r.physicalSize === null
+                ? r.size : r.physicalSize),
+          r.cloudProvider || null,
+          r.cloudPlaceholder ? 1 : 0,
+          r.cloudStreamed ? 1 : 0
         );
       }
       this.db.exec('COMMIT');
@@ -812,14 +1087,256 @@ class Index {
     return { clause: `path LIKE ? ESCAPE '\\'`, arg: escapeLike(prefix) + '%' };
   }
 
-  /** Candidate groups for exact-duplicate detection: same size, more than one file. */
-  sizeCollisionGroups(scanId, minBytes = 4096, { under = null } = {}) {
+  /**
+   * Candidate groups for exact-duplicate detection: same size, more than one file.
+   *
+   * Cloud placeholders are excluded, and that exclusion is not a detail. A
+   * placeholder reports a size but holds no bytes here, so hashing one means
+   * downloading the whole file. Over a dehydrated OneDrive that turns a
+   * duplicate scan into a download of the entire account — hours of transfer
+   * the user never asked for, and on a metered connection, money. They are
+   * counted separately by `placeholdersExcluded` so the interface can say what
+   * was left out instead of quietly returning a smaller answer.
+   */
+  sizeCollisionGroups(scanId, minBytes = 4096, { under = null, includeCloud = false } = {}) {
     const scope = Index._underClause(under);
+    const cloudClause = includeCloud ? '' : ' AND cloudPlaceholder = 0 AND cloudStreamed = 0';
     return this.db.prepare(`
       SELECT size, COUNT(*) AS n FROM files
-      WHERE scanId = ? AND isDirectory = 0 AND size >= ?${scope ? ` AND ${scope.clause}` : ''}
+      WHERE scanId = ? AND isDirectory = 0 AND size >= ?${
+        scope ? ` AND ${scope.clause}` : ''}${cloudClause}
       GROUP BY size HAVING n > 1 ORDER BY size DESC
     `).all(...[scanId, minBytes, ...(scope ? [scope.arg] : [])]);
+  }
+
+  /**
+   * What the last scan recorded about where a path's bytes live.
+   *
+   * Looked up at plan-building time rather than threaded through every scanner,
+   * because every scanner would have to remember to carry it and one that
+   * forgot would produce a plan entry that silently loses the warning. One
+   * lookup, in one place, cannot be forgotten by a new scanner added later.
+   *
+   * A path the scan never saw returns nulls, which the plan entry treats as
+   * "not in a sync folder" — the same answer it had before any of this existed.
+   */
+  cloudInfoForPath(scanId, filePath) {
+    if (!scanId || !filePath) return null;
+    const row = this.db.prepare(`
+      SELECT cloudProvider, cloudPlaceholder, physicalSize, size
+      FROM files WHERE scanId = ? AND path = ? LIMIT 1
+    `).get(scanId, path.resolve(filePath));
+    if (!row) return null;
+    return {
+      cloudProvider: row.cloudProvider || null,
+      cloudPlaceholder: row.cloudPlaceholder === 1,
+      physicalBytes: row.physicalSize ?? row.size,
+    };
+  }
+
+  /**
+   * Whether anything under a path is inside a sync folder.
+   *
+   * Used for directory entries — a leftover is a folder, and the folder itself
+   * has no cloud row of its own worth trusting, but what is inside it does.
+   */
+  cloudInfoForTree(scanId, dirPath) {
+    if (!scanId || !dirPath) return null;
+    const scope = Index._underClause(path.resolve(dirPath));
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n,
+             SUM(cloudPlaceholder) AS placeholders,
+             MAX(cloudProvider) AS provider,
+             SUM(physicalSize) AS physical
+      FROM files
+      WHERE scanId = ? AND isDirectory = 0 AND cloudProvider IS NOT NULL AND ${scope.clause}
+    `).get(scanId, scope.arg);
+    if (!row || !row.n) return null;
+    return {
+      cloudProvider: row.provider || null,
+      cloudPlaceholder: row.placeholders === row.n,
+      physicalBytes: row.physical || 0,
+      syncedFiles: row.n,
+    };
+  }
+
+  /**
+   * The sync-folder picture for one scan, per provider.
+   *
+   * Returns null when nothing in the scan is in a sync folder, so an interface
+   * can leave the whole subject out rather than drawing an empty panel about
+   * cloud storage to somebody who has none.
+   */
+  cloudSummary(scanId) {
+    const rows = this.db.prepare(`
+      SELECT cloudProvider AS provider,
+             COUNT(*) AS files,
+             SUM(size) AS logicalBytes,
+             SUM(physicalSize) AS physicalBytes,
+             SUM(cloudPlaceholder) AS placeholders,
+             SUM(CASE WHEN cloudPlaceholder = 1 THEN size ELSE 0 END) AS placeholderBytes
+      FROM files
+      WHERE scanId = ? AND isDirectory = 0 AND cloudProvider IS NOT NULL
+      GROUP BY cloudProvider
+    `).all(scanId);
+    if (!rows.length) return null;
+
+    const total = rows.reduce((acc, r) => ({
+      files: acc.files + r.files,
+      logicalBytes: acc.logicalBytes + (r.logicalBytes || 0),
+      physicalBytes: acc.physicalBytes + (r.physicalBytes || 0),
+      placeholders: acc.placeholders + (r.placeholders || 0),
+      placeholderBytes: acc.placeholderBytes + (r.placeholderBytes || 0),
+    }), { files: 0, logicalBytes: 0, physicalBytes: 0, placeholders: 0, placeholderBytes: 0 });
+
+    return { providers: rows, ...total };
+  }
+
+  // ── cloud accounts' files ────────────────────────────────────────────────
+  //
+  // Everything here was reported by a provider over the network. None of it was
+  // measured by this machine, and the interface must never present it as though
+  // it had been.
+
+  /** Replaces one account's imported listing, inside a transaction. */
+  replaceCloudFiles(accountId, provider, rows) {
+    const now = new Date().toISOString();
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare(`DELETE FROM cloud_files WHERE accountId = ?`).run(accountId);
+      const stmt = this.db.prepare(`
+        INSERT INTO cloud_files
+          (accountId, provider, remoteId, name, mimeType, size, hash, hashAlgorithm,
+           modifiedAt, createdAt, webUrl, parentPath, isNativeDoc, importedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const r of rows) {
+        stmt.run(
+          accountId, provider, r.remoteId, r.name, r.mimeType || null,
+          r.size === null || r.size === undefined ? null : r.size,
+          r.hash || null, r.hashAlgorithm || null,
+          r.modifiedAt || null, r.createdAt || null, r.webUrl || null,
+          r.parentPath || null, r.isNativeDoc ? 1 : 0, now
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return rows.length;
+  }
+
+  cloudFileStats(accountId = null) {
+    const where = accountId ? 'WHERE accountId = ?' : '';
+    const args = accountId ? [accountId] : [];
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS files,
+             SUM(COALESCE(size, 0)) AS bytes,
+             SUM(CASE WHEN hash IS NOT NULL THEN 1 ELSE 0 END) AS hashed,
+             SUM(CASE WHEN isNativeDoc = 1 THEN 1 ELSE 0 END) AS nativeDocs,
+             MAX(importedAt) AS lastImportAt
+      FROM cloud_files ${where}
+    `).get(...args);
+    return {
+      files: row?.files || 0,
+      bytes: row?.bytes || 0,
+      hashed: row?.hashed || 0,
+      nativeDocs: row?.nativeDocs || 0,
+      lastImportAt: row?.lastImportAt || null,
+    };
+  }
+
+  /**
+   * Duplicates inside the cloud, found on the provider's own hashes.
+   *
+   * Grouped by algorithm as well as value, so an MD5 from Google can never be
+   * joined to a SHA-256 from OneDrive and reported as a match. Within one
+   * algorithm the match is exact and needed no download.
+   */
+  cloudDuplicateGroups({ minBytes = 1, accountId = null } = {}) {
+    const scope = accountId ? 'AND accountId = ?' : '';
+    const args = accountId ? [minBytes, accountId] : [minBytes];
+    const groups = this.db.prepare(`
+      SELECT hashAlgorithm, hash, COUNT(*) AS n, MAX(size) AS size,
+             SUM(COALESCE(size,0)) AS totalBytes
+      FROM cloud_files
+      WHERE hash IS NOT NULL AND COALESCE(size,0) >= ? ${scope}
+      GROUP BY hashAlgorithm, hash
+      HAVING n > 1
+      ORDER BY totalBytes DESC
+      LIMIT 500
+    `).all(...args);
+
+    return groups.map((g) => ({
+      ...g,
+      wastedBytes: (g.size || 0) * (g.n - 1),
+      members: this.db.prepare(`
+        SELECT accountId, provider, remoteId, name, size, webUrl, modifiedAt, parentPath
+        FROM cloud_files
+        WHERE hashAlgorithm = ? AND hash = ?
+        ORDER BY COALESCE(modifiedAt, '') ASC
+      `).all(g.hashAlgorithm, g.hash),
+    }));
+  }
+
+  /**
+   * Files present both in a cloud account and on this disk.
+   *
+   * Joined on the hash only where the algorithms agree — OneDrive's sha256Hash
+   * against a local SHA-256 is a real match; Google's MD5 against it is not
+   * comparable at all, and those are reported separately as size-only
+   * candidates rather than as matches.
+   */
+  cloudLocalMatches(scanId, { minBytes = 1 << 20, limit = 200 } = {}) {
+    const rows = this.db.prepare(`
+      SELECT c.accountId, c.provider, c.name AS cloudName, c.size, c.webUrl,
+             c.hashAlgorithm, c.remoteId,
+             f.path AS localPath, f.cloudProvider AS localSyncedTo
+      FROM cloud_files c
+      JOIN files f
+        ON f.scanId = ?
+       AND f.isDirectory = 0
+       AND f.size = c.size
+       AND LOWER(f.name) = LOWER(c.name)
+      WHERE c.size >= ?
+      ORDER BY c.size DESC
+      LIMIT ?
+    `).all(scanId, minBytes, Math.min(Math.max(1, limit), 1000));
+
+    // The confidence is decided here rather than in SQL, because it depends on
+    // whether the two hashes are even the same kind of thing. Only sha256 from
+    // OneDrive is directly comparable with what NexaFiles computes locally;
+    // anything else is a name-and-size coincidence and is labelled as one.
+    return rows.map((r) => ({
+      ...r,
+      basis: r.hashAlgorithm === 'sha256'
+        ? 'same name and size, and the provider reports a SHA-256 that can be ' +
+          'checked against a local hash'
+        : 'same name and size only — the provider\'s hash is ' +
+          `${r.hashAlgorithm || 'absent'}, which cannot be compared with a local one`,
+      comparable: r.hashAlgorithm === 'sha256',
+    }));
+  }
+
+  clearCloudFiles(accountId) {
+    const n = this.db.prepare(`SELECT COUNT(*) AS n FROM cloud_files WHERE accountId = ?`)
+      .get(accountId)?.n || 0;
+    this.db.prepare(`DELETE FROM cloud_files WHERE accountId = ?`).run(accountId);
+    return n;
+  }
+
+  /** How many files a content scan is leaving alone because reading them downloads them. */
+  placeholdersExcluded(scanId, { under = null, minBytes = 0 } = {}) {
+    const scope = Index._underClause(under);
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n, SUM(size) AS bytes,
+             COUNT(DISTINCT cloudProvider) AS providers
+      FROM files
+      WHERE scanId = ? AND isDirectory = 0 AND cloudPlaceholder = 1 AND size >= ?${
+        scope ? ` AND ${scope.clause}` : ''}
+    `).get(...[scanId, minBytes, ...(scope ? [scope.arg] : [])]);
+    return { count: row?.n || 0, bytes: row?.bytes || 0, providers: row?.providers || 0 };
   }
 
   /**
@@ -831,11 +1348,17 @@ class Index {
    * "duplicates in Downloads" search would report pairs that are not both in
    * Downloads.
    */
-  filesOfSize(scanId, size, { under = null } = {}) {
+  filesOfSize(scanId, size, { under = null, includeCloud = false } = {}) {
     const scope = Index._underClause(under);
+    // Excluded on the same terms as the size groups that produced this call.
+    // If they disagreed, a group counted without placeholders would go on to
+    // collect members including them, and the scan would download the very
+    // files the grouping was careful to leave out.
+    const cloudClause = includeCloud ? '' : ' AND cloudPlaceholder = 0 AND cloudStreamed = 0';
     return this.db.prepare(`
       SELECT path, size, fileId FROM files
-      WHERE scanId = ? AND isDirectory = 0 AND size = ?${scope ? ` AND ${scope.clause}` : ''}
+      WHERE scanId = ? AND isDirectory = 0 AND size = ?${
+        scope ? ` AND ${scope.clause}` : ''}${cloudClause}
     `).all(...[scanId, size, ...(scope ? [scope.arg] : [])]);
   }
 
@@ -848,6 +1371,45 @@ class Index {
         scope ? ` AND ${scope.clause}` : ''}
       ORDER BY size DESC
     `).all(...[scanId, minBytes, ...exts, ...(scope ? [scope.arg] : [])]);
+  }
+
+  /**
+   * Files worth describing, in the order worth describing them.
+   *
+   * Deliberately not `filesByExtensions`, which orders by size descending
+   * because its caller — the document text index — genuinely wants the biggest
+   * documents first. Describing has the opposite priority and the mistake was
+   * expensive: with a per-run cap of 200 over a scan of nearly a million files,
+   * size-first spends every call on the largest PDFs on the disk and never
+   * reaches an 80 KB photo in Downloads, which is exactly the file the feature
+   * exists to find.
+   *
+   * So: pictures first, because nothing on disk says what is in one and they
+   * are the case with no alternative; then most recently changed, because a
+   * capped run should cover what the user has been working with rather than
+   * whatever happens to sort first.
+   */
+  describeCandidates(scanId, {
+    imageExts = [], otherExts = [], under = null, limit = 2000, includeCloud = false,
+  } = {}) {
+    const all = [...imageExts, ...otherExts];
+    if (!all.length) return [];
+    const allMarks = all.map(() => '?').join(',');
+    const imgMarks = imageExts.length ? imageExts.map(() => '?').join(',') : "''";
+    const scope = Index._underClause(under);
+    return this.db.prepare(`
+      SELECT path, size, mtimeMs, extension,
+             CASE WHEN extension IN (${imgMarks}) THEN 0 ELSE 1 END AS kindRank
+      FROM files
+      WHERE scanId = ? AND isDirectory = 0 AND size > 0
+        AND extension IN (${allMarks})${scope ? ` AND ${scope.clause}` : ''}
+        ${includeCloud ? '' : 'AND cloudPlaceholder = 0 AND cloudStreamed = 0'}
+      ORDER BY kindRank ASC, mtimeMs DESC
+      LIMIT ?
+    `).all(...[
+      ...imageExts, scanId, ...all, ...(scope ? [scope.arg] : []),
+      Math.min(Math.max(1, limit), 50_000),
+    ]);
   }
 
   // ── duplicates ───────────────────────────────────────────────────────────

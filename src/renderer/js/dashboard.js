@@ -200,6 +200,87 @@ export function storagePanel(summary, { formatBytes }) {
 
 const PALETTE_SCAN = 'var(--mint-700)';
 
+// ── cloud sync folders ──────────────────────────────────────────────────────
+
+const CLOUD_LABEL = {
+  onedrive: 'OneDrive',
+  googledrive: 'Google Drive',
+  dropbox: 'Dropbox',
+  icloud: 'iCloud Drive',
+  box: 'Box',
+};
+
+/**
+ * What the scan found inside sync folders, and how much of it is really here.
+ *
+ * Drawn only when there is something to draw. The figure that matters is the
+ * gap between the two totals: a folder can report forty gigabytes and occupy
+ * nothing, and every other number in this application would be wrong about it
+ * if that gap were folded away.
+ */
+export function cloudPanel(summary, { formatBytes }) {
+  const c = summary.cloud;
+  if (!c || !c.files) return '';
+
+  const onlineOnly = c.placeholderBytes || 0;
+  const pct = c.logicalBytes ? Math.round((onlineOnly / c.logicalBytes) * 100) : 0;
+
+  return `
+    <div class="panel">
+      <header>
+        <h2>In cloud folders</h2>
+        <span class="muted">${esc(Number(c.files).toLocaleString())} file(s) across
+          ${c.providers.length} sync folder(s)</span>
+      </header>
+
+      <div class="plan-totals">
+        <div>
+          <div class="plan-total-value">${esc(formatBytes(c.logicalBytes))}</div>
+          <div class="plan-total-label">reported by these files</div>
+        </div>
+        <div>
+          <div class="plan-total-value">${esc(formatBytes(c.physicalBytes))}</div>
+          <div class="plan-total-label">actually on this disk</div>
+        </div>
+        <div>
+          <div class="plan-total-value">${esc(Number(c.placeholders).toLocaleString())}</div>
+          <div class="plan-total-label">online-only, holding no bytes here</div>
+        </div>
+      </div>
+
+      ${c.providers.length > 1 ? `
+        <div class="cap-legend" style="margin-top:4px">
+          ${c.providers.map((p) => `
+            <span class="legend-item">
+              <span>${esc(CLOUD_LABEL[p.provider] || p.provider)}</span>
+              <span class="legend-bytes">${esc(formatBytes(p.physicalBytes))} of
+                ${esc(formatBytes(p.logicalBytes))} here</span>
+            </span>`).join('')}
+        </div>` : ''}
+
+      ${onlineOnly ? `
+        <div class="panel-note caution">
+          ${icon('caution', { size: 13 })}
+          <strong>${esc(formatBytes(onlineOnly))} of this — ${pct}% — is not on your
+          disk.</strong>
+          Those files live in the cloud and are downloaded on demand. Deleting one
+          frees almost nothing here, and tells the sync client to delete it from the
+          cloud and from every other device you are signed in on, which NexaFiles
+          cannot undo.
+          <br><br>
+          For that reason nothing inside a sync folder is ever pre-selected in a
+          cleanup plan, and duplicate and description scans skip online-only files
+          rather than downloading them to read.
+        </div>` : `
+        <div class="panel-note">
+          ${icon('info', { size: 13 })}
+          Everything in these folders is downloaded and present on this disk. Note
+          that deleting a file here still removes it from the cloud and from your
+          other devices, so nothing in a sync folder is pre-selected in a plan.
+        </div>`}
+    </div>`;
+}
+
 // ── boot-session graph ──────────────────────────────────────────────────────
 
 export function sessionPanel(session, metric, { formatBytes }) {

@@ -256,10 +256,15 @@ class GeminiClient {
     throw last;
   }
 
-  async _callOnce(keyIndex, contents, systemInstruction, tools, signal = null) {
+  async _callOnce(keyIndex, contents, systemInstruction, tools, signal = null,
+                  generationConfig = null) {
     const body = { contents };
     if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
     if (tools) body.tools = tools;
+    // Optional, and absent for every existing caller. It exists so that the
+    // callers who need machine-readable output — describing a file, expanding a
+    // search — can ask the API to emit JSON rather than hoping prose parses.
+    if (generationConfig) body.generationConfig = generationConfig;
 
     // Two things can end this request: the timeout, and the user pressing Stop.
     // Both are aborts, and they are combined rather than raced by hand so that
@@ -317,7 +322,8 @@ class GeminiClient {
    * @param {Array} contents Gemini `contents` array
    * @throws when no key could complete the request
    */
-  async generate(contents, { systemInstruction = null, tools = null, signal = null } = {}) {
+  async generate(contents, { systemInstruction = null, tools = null, signal = null,
+                             generationConfig = null } = {}) {
     if (signal?.aborted) {
       const stopped = new Error('Stopped.');
       stopped.code = 'CANCELLED';
@@ -340,7 +346,7 @@ class GeminiClient {
       if (idx === null) break;
       try {
         return await this._withTransientRetries(
-          () => this._callOnce(idx, contents, systemInstruction, tools, signal), signal);
+          () => this._callOnce(idx, contents, systemInstruction, tools, signal, generationConfig), signal);
       } catch (err) {
         if (err.code === 'CANCELLED') throw err;
         if (err.rateLimited) {
@@ -361,7 +367,7 @@ class GeminiClient {
       if (idx !== null) {
         try {
           return await this._withTransientRetries(
-            () => this._callOnce(idx, contents, systemInstruction, tools, signal), signal);
+            () => this._callOnce(idx, contents, systemInstruction, tools, signal, generationConfig), signal);
         } catch (err) {
           if (err.code === 'CANCELLED') throw err;
           if (err.rateLimited) this.cooldownUntil.set(idx, Date.now() + RATE_LIMIT_COOLDOWN_MS);

@@ -75,8 +75,41 @@ function defaults() {
       // switching it on is not by itself enough to make it listen.
       wakeWord: false,
     },
+    // Describing files so they can be found by describing them.
+    //
+    // Off by default, and it is the second setting in this file that has to be
+    // — the wake word is the other. Switching it on sends the contents of the
+    // files it describes to Google: the pixels of a photo, the text of a
+    // document. That is a decision a person makes deliberately, not one they
+    // discover afterwards, so nothing here happens until this is true.
+    describe: {
+      enabled: false,
+      // A ceiling on how many files one build will describe, because each one
+      // is an API call. The user can raise it; it exists so that pressing the
+      // button cannot quietly spend a thousand calls.
+      maxFilesPerRun: 200,
+      // Whether documents and code are described as well as images. Images are
+      // the case this feature exists for and are cheap to describe; a folder of
+      // source files is neither.
+      includeDocuments: true,
+      includeCode: false,
+    },
+    // Connecting to a cloud account.
+    //
+    // Only the client IDs live here. They are registered by whoever runs this
+    // copy and are not credentials: OAuth calls an installed application a
+    // "public client" precisely because it cannot keep a secret, which is why
+    // the flow uses PKCE and there is no secret field to fill in. The tokens a
+    // sign-in produces are a different matter entirely and are encrypted — see
+    // src/main/cloud/accounts.js.
+    cloud: {
+      googleClientId: '',
+      microsoftClientId: '',
+    },
   };
 }
+
+const DESCRIBE_KINDS = ['includeDocuments', 'includeCode'];
 
 /**
  * Coerces anything into a valid settings object. Never throws.
@@ -95,6 +128,8 @@ function sanitise(raw, base = defaults()) {
     dictation: { ...defaults().dictation, ...(base.dictation || {}) },
     files: { ...defaults().files, ...(base.files || {}) },
     overlay: { ...defaults().overlay, ...(base.overlay || {}) },
+    describe: { ...defaults().describe, ...(base.describe || {}) },
+    cloud: { ...defaults().cloud, ...(base.cloud || {}) },
   };
   if (!raw || typeof raw !== 'object') return out;
 
@@ -142,6 +177,32 @@ function sanitise(raw, base = defaults()) {
     }
   }
   if (!HOTKEY_PATTERN.test(out.overlay.hotkey || '')) out.overlay.hotkey = DEFAULT_HOTKEY;
+
+  const de = raw.describe;
+  if (de && typeof de === 'object') {
+    if (typeof de.enabled === 'boolean') out.describe.enabled = de.enabled;
+    for (const k of DESCRIBE_KINDS) {
+      if (typeof de[k] === 'boolean') out.describe[k] = de[k];
+    }
+    // Clamped rather than trusted: this number decides how many paid API calls
+    // one button press can make.
+    const n = Number(de.maxFilesPerRun);
+    if (Number.isFinite(n)) {
+      out.describe.maxFilesPerRun = Math.min(Math.max(10, Math.round(n)), 5000);
+    }
+  }
+
+  const cl = raw.cloud;
+  if (cl && typeof cl === 'object') {
+    // A client id is a path/query value in an OAuth URL, so anything that could
+    // change which URL is called is refused rather than encoded around. An empty
+    // string is a deliberate "forget it" and is accepted.
+    for (const k of ['googleClientId', 'microsoftClientId']) {
+      if (typeof cl[k] !== 'string') continue;
+      const v = cl[k].trim();
+      if (v === '' || /^[A-Za-z0-9._~:@-]{8,200}$/.test(v)) out.cloud[k] = v;
+    }
+  }
 
   const f = raw.files;
   if (f && typeof f === 'object') {
@@ -192,6 +253,7 @@ class Settings {
       theme: this.values.theme,
       files: { ...this.values.files },
       overlay: { ...this.values.overlay },
+      describe: { ...this.values.describe },
       assistant: {
         model: this.values.assistant.model,
         keyCount: keys.length,

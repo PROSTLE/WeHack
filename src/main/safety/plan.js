@@ -71,11 +71,47 @@ class PlanEntry {
     this.source = spec.source || 'unknown'; // which scanner produced this
     this.group = spec.group || null;        // e.g. a duplicate-set id
 
+    // Whether this file lives in a cloud sync folder, and if so what removing
+    // it really means.
+    //
+    // NexaFiles' promise is that a removal is reversible: files go to the
+    // recycle bin, application internals go to quarantine, and either can be
+    // put back. Inside a synced folder that promise does not hold the way a
+    // user expects. The delete is picked up by the sync client and propagated
+    // to the cloud and to every other device signed in — a phone, a work
+    // laptop — where there is no recycle bin of ours to restore from.
+    //
+    // So a synced file keeps its entry, because hiding it would be its own
+    // kind of dishonesty, but it can never be pre-selected and it carries the
+    // warning with it. The user decides, knowing.
+    this.cloudProvider = spec.cloudProvider || null;
+    this.cloudPlaceholder = !!spec.cloudPlaceholder;
+    // What deleting it would actually free here, which for a placeholder is
+    // nothing: the bytes are not on this disk to begin with.
+    this.physicalBytes = spec.physicalBytes === undefined || spec.physicalBytes === null
+      ? this.bytes
+      : spec.physicalBytes;
+    this.cloudWarning = this.cloudProvider
+      ? `This file is inside ${this.cloudProvider}. Removing it here tells the sync ` +
+        `client to remove it everywhere — the cloud copy and every other signed-in ` +
+        `device. NexaFiles cannot undo that part.` +
+        (this.cloudPlaceholder
+          ? ` It is also online-only: its ${this.bytes} bytes are not on this disk, ` +
+            `so removing it frees nothing locally.`
+          : '')
+      : null;
+
     // Invariant 2. Anything that is user data, or that the code is not confident
     // about, starts unselected no matter what the producer requested.
+    //
+    // Invariant 2b, added with cloud awareness: nothing inside a sync folder is
+    // ever pre-selected, whatever its category or confidence. A regenerable
+    // cache that happens to sit in OneDrive is still a deletion that leaves
+    // this machine.
     this.selected =
       this.category === CATEGORY.REGENERABLE &&
       this.confidence !== CONFIDENCE.LOW &&
+      !this.cloudProvider &&
       spec.selected !== false;
   }
 }

@@ -135,6 +135,8 @@ app.whenReady().then(() => {
       const views = [
         ['Overview', 'overview', 2200],
         ['Files', 'files', 3000],
+        ['Discover', 'discover', 1500],
+        ['Cloud', 'cloud', 1500],
         ['Duplicates', 'duplicates', 1200],
         ['Leftovers', 'leftovers', 1200],
         ['Startup', 'startup', 1200],

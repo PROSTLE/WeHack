@@ -25,6 +25,9 @@ const NODE_SUITES = [
   ['video sub-clip detection', 'video.test.js'],
   ['document and video duplicates', 'content-dupes.test.js'],
   ['searching inside documents', 'content-index.test.js'],
+  ['describing files, and finding them by description', 'describe.test.js'],
+  ['cloud sync folders and placeholder files', 'cloud.test.js'],
+  ['cloud accounts, OAuth and credential storage', 'cloud-accounts.test.js'],
   // Drives whichever office suite is installed. Skips itself, loudly, on a
   // machine that has none rather than reporting a pass it did not earn.
   ['document conversion to PDF', 'convert.test.js'],

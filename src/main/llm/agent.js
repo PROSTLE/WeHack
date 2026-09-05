@@ -230,6 +230,55 @@ function toolDeclarations() {
         },
       },
       {
+        name: 'find_files_by_description',
+        description:
+          'Find a file from a description of WHAT IS IN IT, including pictures. This ' +
+          'is the only tool that can answer "the photo of the brown dog on grass" or ' +
+          '"that screenshot of the error message" — search_file_contents reads words ' +
+          'inside documents and cannot see an image at all. Use this whenever the ' +
+          'user describes a picture, or describes a file by its subject rather than ' +
+          'its name. It searches descriptions written earlier by a model that was ' +
+          'shown each file; files that have not been described cannot be found this ' +
+          'way, and the reply says how many have been. Every tag it returns is ' +
+          'model-written, so attribute them as "described as", never as measured.',
+        parameters: {
+          type: 'object',
+          properties: {
+            description: {
+              type: 'string',
+              description: 'What is in the file, in the user\'s own words. ' +
+                'Pass the description itself, not a keyword list.',
+            },
+            kind: {
+              type: 'string',
+              description: 'Optional: "image", "document" or "code", when the user ' +
+                'was explicit about which. Leave unset otherwise.',
+            },
+            limit: { type: 'number', description: 'How many to return, at most 40.' },
+          },
+          required: ['description'],
+        },
+      },
+      {
+        name: 'open_file',
+        description:
+          'Open one file in whatever application the system associates with it. Call ' +
+          'this when the user asks to open, view, play or show a specific file. The ' +
+          'path must be one you already found with a search tool — do not guess a ' +
+          'path. Folders and programs are refused. If more than one file could be ' +
+          'meant, call ask_user_to_choose first and open the one they pick.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: 'Absolute path of a file from an earlier tool result.',
+            },
+          },
+          required: ['path'],
+        },
+      },
+      {
         name: 'read_document',
         description:
           'Read more of one document that search_file_contents already found, to tell ' +

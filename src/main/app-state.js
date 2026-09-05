@@ -19,9 +19,14 @@ const { GroqClient } = require('./llm/groq');
 const { WakeModelStore } = require('./wake/model-store');
 const { Agent } = require('./llm/agent');
 
+const { CloudAccounts } = require('./cloud/accounts');
+
 class AppState {
-  constructor({ userDataDir, trashItem }) {
+  constructor({ userDataDir, trashItem, safeStorage = null }) {
     this.userDataDir = userDataDir;
+    // Connected cloud accounts. safeStorage is injected rather than required
+    // here so this class stays constructible in a test without Electron.
+    this.cloudAccounts = new CloudAccounts(userDataDir, safeStorage);
     this.index = new Index(path.join(userDataDir, 'nexafiles_index.db')).open();
     this.scanner = new ScanController(this.index);
     this.quarantine = new Quarantine(path.join(userDataDir, 'quarantine'));
@@ -62,6 +67,15 @@ class AppState {
     // the sentence that put each file on the list.
     this.lastContentMatches = new Map();
 
+    // The same, for the most recent description search: the tags that put each
+    // file on the list, so a follow-up "which of these did you mean" can show
+    // why each one is there rather than asking for a choice on trust.
+    this.lastDescriptionMatches = new Map();
+
+    // Whether a description build is running, so a second one is refused rather
+    // than spending a second set of API calls on the same files.
+    this.taggingRun = null;
+
     // Most recent scanner outputs, so the UI and the agent share one result set.
     this.lastDuplicates = { exact: null, image: null, text: null, video: null };
     this.lastLeftovers = null;
@@ -69,11 +83,15 @@ class AppState {
 
     this.settings = new Settings(userDataDir);
 
-    this.gemini = GeminiClient.fromEnvironment(() => {
-      // Optional local config file, gitignored, never shipped.
-      const p = path.join(__dirname, '..', '..', 'config.js');
-      return fs.existsSync(p) ? require(p) : null;
-    });
+    // The optional local config file, read once. Gitignored, never committed.
+    this.localConfig = (() => {
+      try {
+        const p = path.join(__dirname, '..', '..', 'config.js');
+        return fs.existsSync(p) ? require(p) : null;
+      } catch { return null; }
+    })();
+
+    this.gemini = GeminiClient.fromEnvironment(() => this.localConfig);
 
     // Where the key in use came from, so the interface can say so rather than
     // just reporting that one exists.
@@ -167,6 +185,33 @@ class AppState {
       console.warn(`[roots] could not persist approved roots: ${err.message}`);
     }
     return list;
+  }
+
+  /**
+   * The OAuth client id for a provider, and where it came from.
+   *
+   * A client id is not a credential — it identifies the application, not the
+   * user, and every app with a "Sign in with Google" button ships one openly.
+   * So unlike an API key it is perfectly reasonable to bake in, and when it is,
+   * the user never sees the subject at all: they press Sign in.
+   *
+   * Precedence runs from most deliberate to least: something the user typed in
+   * Settings beats the environment, which beats what the build shipped with.
+   */
+  cloudClientId(provider) {
+    const key = provider === 'google' ? 'googleClientId' : 'microsoftClientId';
+    const fromSettings = (this.settings.values.cloud?.[key] || '').trim();
+    if (fromSettings) return { clientId: fromSettings, source: 'settings' };
+
+    const envName = provider === 'google'
+      ? 'CLOUD_GOOGLE_CLIENT_ID' : 'CLOUD_MICROSOFT_CLIENT_ID';
+    const fromEnv = (process.env[envName] || '').trim();
+    if (fromEnv) return { clientId: fromEnv, source: 'environment' };
+
+    const fromConfig = String(this.localConfig?.[envName] || '').trim();
+    if (fromConfig) return { clientId: fromConfig, source: 'config file' };
+
+    return { clientId: '', source: null };
   }
 
   /** The scan the UI is currently showing, or null if none has ever run. */

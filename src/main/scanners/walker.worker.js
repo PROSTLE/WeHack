@@ -17,11 +17,22 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const { classifyPath } = require('../classify/rules');
+const cloud = require('../fs/cloud');
 
 const BATCH_SIZE = 2000;
 
 async function walk() {
   const { root, followSymlinks = false, crossDevice = false } = workerData;
+
+  // Which of this machine's folders are cloud sync roots. Resolved once, before
+  // the walk, because the answer is a property of the machine and asking per
+  // file would cost a directory probe a million times over. A file inside one
+  // of these may report a size while holding none of those bytes locally, and
+  // the walk has to record which — see src/main/fs/cloud.js.
+  let cloudMatcher = cloud.makeMatcher([]);
+  try {
+    cloudMatcher = cloud.makeMatcher(await cloud.detectProviders());
+  } catch { /* no sync folders detectable; every file counts as ordinary */ }
 
   let rootDev = null;
   try {
@@ -35,6 +46,11 @@ async function walk() {
   const seenDirs = new Set();          // realpath guard against link loops
   let batch = [];
   let fileCount = 0, dirCount = 0, totalBytes = 0;
+  // Measured beside totalBytes, never instead of it. Both are true and they
+  // answer different questions: what these files weigh, and what of that is
+  // actually on this disk.
+  let physicalBytes = 0, placeholderCount = 0, placeholderBytes = 0;
+  let streamedCount = 0, streamedBytes = 0;
   let skipped = 0;
   const skipReasons = new Map();
   let cancelled = false;
@@ -115,7 +131,25 @@ async function walk() {
         fileCount++;
         totalBytes += st.size;
         const c = classifyPath(full, { isDirectory: false });
-        batch.push(rowFor(full, dir, false, st.size, st, depth + 1, c));
+        // What of this file is actually here. For anything outside a sync
+        // folder this is the file's own size and costs nothing to record; for
+        // a placeholder it is zero, and that difference is the whole point.
+        const storage = cloud.describeStorage(st, cloudMatcher.match(full));
+        if (storage.placeholder) {
+          placeholderCount++;
+          placeholderBytes += st.size;
+        }
+        if (storage.streamed) {
+          streamedCount++;
+          streamedBytes += st.size;
+        }
+        // A streamed file contributes to neither total: its local footprint is
+        // not knowable, and guessing either way would put an invented number
+        // into a figure the interface presents as measured.
+        if (!storage.streamed) {
+          physicalBytes += storage.physicalBytes === null ? st.size : storage.physicalBytes;
+        }
+        batch.push(rowFor(full, dir, false, st.size, st, depth + 1, c, storage));
       } else {
         noteSkip('not a regular file');
       }
@@ -149,10 +183,17 @@ async function walk() {
     type: 'done',
     cancelled,
     fileCount, dirCount, totalBytes, skipped, notes,
+    // The cloud picture for this walk. Reported separately so the interface can
+    // say "8.9 GB of this is in OneDrive and not on your disk" rather than
+    // quietly folding it into a total that would then be wrong.
+    physicalBytes, placeholderCount, placeholderBytes, streamedCount, streamedBytes,
+    cloudRoots: cloudMatcher.providers.map((p) => ({
+      provider: p.provider, label: p.label, path: p.path,
+    })),
   });
 }
 
-function rowFor(full, parent, isDirectory, size, st, depth, c) {
+function rowFor(full, parent, isDirectory, size, st, depth, c, storage = null) {
   return {
     path: full,
     name: path.basename(full) || full,
@@ -168,6 +209,11 @@ function rowFor(full, parent, isDirectory, size, st, depth, c) {
     depth,
     // dev:inode identifies hardlinks, so the same bytes are not counted twice.
     fileId: st && st.ino ? `${st.dev}:${st.ino}` : null,
+    // Null rather than the size when there is no storage reading, so the
+    // database can tell "not measured" from "measured as equal".
+    physicalSize: storage ? storage.physicalBytes : null,
+    cloudProvider: storage ? storage.provider : null,
+    cloudPlaceholder: storage ? storage.placeholder : false,
   };
 }
 
