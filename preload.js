@@ -27,4 +27,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createFolder: (parentDir, folderName) => ipcRenderer.invoke('create-folder', parentDir, folderName),
   moveFile: (sourcePath, destDir) => ipcRenderer.invoke('move-file', sourcePath, destDir),
   openFileNative: (filePath) => ipcRenderer.invoke('open-file-native', filePath),
+
+  // Local Database
+  dbGetAllFiles: () => ipcRenderer.invoke('db-get-all-files'),
+  dbInsertFile: (fileData) => ipcRenderer.invoke('db-insert-file', fileData),
+  dbDeleteFile: (filePath) => ipcRenderer.invoke('db-delete-file', filePath),
+  dbClearIndex: () => ipcRenderer.invoke('db-clear-index'),
+
+  // AI (hybrid sklearn + Gemini)
+  aiHealth: () => ipcRenderer.invoke('ai-health'),
+  aiClassify: (payload) => ipcRenderer.invoke('ai-classify', payload),
+  aiSummarize: (payload) => ipcRenderer.invoke('ai-summarize', payload),
+  aiChat: (payload) => ipcRenderer.invoke('ai-chat', payload),
 });

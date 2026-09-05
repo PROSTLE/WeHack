@@ -2228,8 +2228,8 @@
     <span>·</span>
     <span id="status-storage" style="color:var(--muted);"></span>
     <span class="spacer"></span>
-    <div class="status-dot"></div>
-    <span>AI Active</span>
+    <div class="status-dot" id="ai-status-dot"></div>
+    <span id="ai-status-label">AI Checking…</span>
     <span>·</span>
     <span id="status-view">My Files</span>
   </div>
@@ -2409,6 +2409,63 @@
     function winMaximize() { window.electronAPI?.maximize(); }
     function winClose() { window.electronAPI?.close(); }
 
+    async function initApp() {
+      // Check AI server health periodically (every 5 seconds)
+      async function updateAIHealth() {
+        if (window.electronAPI && window.electronAPI.aiHealth) {
+          try {
+            const h = await window.electronAPI.aiHealth();
+            const dot = document.getElementById('ai-status-dot');
+            const lbl = document.getElementById('ai-status-label');
+            if (h && h.sklearn) {
+              dot.style.background = '#22c55e';
+              lbl.textContent = h.gemini ? 'sklearn ✓ · Gemini ✓' : 'sklearn ✓ · Gemini offline';
+            } else {
+              dot.style.background = '#ef4444';
+              lbl.textContent = 'AI Offline (rule-based)';
+            }
+          } catch (e) {
+            document.getElementById('ai-status-dot').style.background = '#ef4444';
+            document.getElementById('ai-status-label').textContent = 'AI Offline';
+          }
+        }
+      }
+
+      updateAIHealth();
+      setInterval(updateAIHealth, 5000);
+
+      if (window.electronAPI && window.electronAPI.dbGetAllFiles) {
+        try {
+          const dbFiles = await window.electronAPI.dbGetAllFiles();
+          if (dbFiles && dbFiles.length > 0) {
+            realFiles = dbFiles.map(f => {
+              const { type, icon } = classifyFile(f);
+              return {
+                ...f,
+                icon,
+                type: f.type || type,
+                sizeBytes: f.size,
+                size: f.isDirectory ? '—' : formatSize(f.size),
+                date: timeAgo(f.modified),
+                rawModified: f.modified,
+                rawCreated: f.created,
+                hasPII: false,
+                compressed: estimateCompression(f),
+              };
+            });
+            files = [...realFiles];
+            currentDirectory = "Local DB Index";
+            loadView('mydocs');
+            updatePathBar(['This PC', 'Local DB Index']);
+            toast('✅', `Loaded ${files.length} files from local index`, 'success');
+          }
+        } catch (e) {
+          console.error("Failed to load local index", e);
+        }
+      }
+    }
+    window.addEventListener('DOMContentLoaded', initApp);
+
     // ══ THEME ══
     (function () {
       const saved = localStorage.getItem('nexafiles-theme') || 'dark';
@@ -2482,6 +2539,7 @@
       return (now - d) < 3 * 24 * 60 * 60 * 1000; // 3 days
     }
 
+    // ── File classification (rule-based sync fallback) ──
     function classifyFile(f) {
       const ext = (f.extension || '').toLowerCase();
       const name = f.name.toLowerCase();
@@ -2500,6 +2558,40 @@
       return { type, icon };
     }
 
+    // ── Hybrid AI file classification (sklearn → updates file in-place) ──
+    async function classifyFileAI(f) {
+      if (!window.electronAPI || !window.electronAPI.aiClassify || f.isDirectory) return;
+      try {
+        // Read first 500 chars for content snippet (text files only)
+        let snippet = '';
+        const textExts = ['.txt', '.md', '.csv', '.json', '.xml', '.html', '.js', '.ts', '.py', '.java', '.log'];
+        if (textExts.includes((f.extension || '').toLowerCase()) && window.electronAPI.readFileHead) {
+          snippet = (await window.electronAPI.readFileHead(f.path, 500)) || '';
+        }
+        const result = await window.electronAPI.aiClassify({
+          filename: f.name,
+          extension: f.extension || '',
+          content_snippet: snippet
+        });
+        if (result && result.category) {
+          // Map sklearn category → UI type
+          const catMap = { work: 'docs', personal: 'docs', media: 'images', code: 'code', archive: 'archives', other: 'docs' };
+          if (catMap[result.category]) f.type = catMap[result.category];
+          f.aiCategory = result.category;
+          f.aiConfidence = Math.round(result.confidence * 100);
+          // Re-render just this card so UI updates live
+          const card = document.querySelector(`[data-id="${f.id}"]`);
+          if (card) card.outerHTML = fileCardHTML(f);
+        }
+      } catch (e) { /* fail silently, keep rule-based result */ }
+    }
+
+    // ── Batch-classify files after directory load ──
+    function batchClassifyAI(fileList) {
+      // Fire-and-forget: classify each file in the background
+      fileList.filter(f => !f.isDirectory).forEach(f => classifyFileAI(f));
+    }
+
     function detectSensitivity(name) {
       const lower = name.toLowerCase();
       const confKeywords = ['salary', 'bank', 'password', 'secret', 'ssn', 'tax', 'payroll', 'confidential', 'private', 'financial', 'credit'];
@@ -2510,9 +2602,11 @@
     }
 
     function estimateCompression(f) {
+      if (f.isDirectory) return null;
       const ext = (f.extension || '').toLowerCase();
-      if (['.png', '.bmp', '.tiff'].includes(ext) && f.size > 102400) return 'WebP -' + (30 + Math.floor(Math.random() * 15)) + '%';
-      if (['.jpg', '.jpeg'].includes(ext) && f.size > 512000) return 'WebP -' + (15 + Math.floor(Math.random() * 10)) + '%';
+      // Only show compression badge on large unoptimized images
+      if (['.png', '.bmp', '.tiff'].includes(ext) && f.size > 102400) return (30 + Math.floor(Math.random() * 15)) + '% smaller as WebP';
+      if (['.jpg', '.jpeg'].includes(ext) && f.size > 512000) return (15 + Math.floor(Math.random() * 10)) + '% smaller as WebP';
       return null;
     }
 
@@ -2585,6 +2679,22 @@
       const area = document.getElementById('files-area');
       if (subset.length === 0) {
         area.innerHTML = `<div class="empty-state"><div class="ei">🗂️</div><div>No files here</div></div>`;
+      } else if (viewMode === 'list') {
+        area.innerHTML = `
+        <div class="files-section-title">${subset.length} item${subset.length !== 1 ? 's' : ''}</div>
+        <div style="display:flex;flex-direction:column;gap:2px;padding:0 8px;">
+          ${subset.map(f => {
+          const sel = selected.has(f.id);
+          return `<div class="file-card ${sel ? 'selected' : ''}" data-id="${f.id}"
+              onclick="selectFile(event,${f.id})" ondblclick="openFile(${f.id})" oncontextmenu="openCtx(event,${f.id})"
+              style="display:flex;align-items:center;gap:12px;padding:6px 12px;border-radius:8px;cursor:pointer;border:1px solid var(--border);background:var(--card);">
+              <span style="font-size:1.3rem;">${f.icon}</span>
+              <span style="flex:1;font-size:0.82rem;font-weight:500;">${f.name}</span>
+              <span style="font-size:0.72rem;color:var(--muted);min-width:60px;text-align:right;">${f.size}</span>
+              <span style="font-size:0.72rem;color:var(--muted);min-width:80px;text-align:right;">${f.date}</span>
+            </div>`;
+        }).join('')}
+        </div>`;
       } else {
         area.innerHTML = `
         <div class="files-section-title">${subset.length} item${subset.length !== 1 ? 's' : ''}</div>
@@ -2604,11 +2714,12 @@
       if (isAI) badge = `<span class="file-badge ai">AI Pick</span>`;
       if (isDup) badge = `<span class="file-badge dup">Duplicate</span>`;
 
-      // Generate mini badges for PII, sensitivity, compression
+      // Generate mini badges for PII, sensitivity, compression, and AI confidence
       let miniBadges = '';
       if (f.hasPII) miniBadges += `<span class="mini-badge pii">🔒 PII</span>`;
       if (f.sensitivity) miniBadges += `<span class="mini-badge sensitive">🛡️ ${f.sensitivity}</span>`;
-      if (f.compressed) miniBadges += `<span class="mini-badge compressed">⚡ ${f.compressed}</span>`;
+      if (f.compressed) miniBadges += `<span class="mini-badge compressed" title="AI optimized size">⚡ -${f.compressed} size</span>`;
+      if (f.aiConfidence !== undefined) miniBadges += `<span class="mini-badge" style="background:rgba(168,85,247,0.15);color:#a855f7;border:1px solid rgba(168,85,247,0.2);" title="sklearn classifier">🤖 ${f.aiCategory} · ${f.aiConfidence}%</span>`;
 
       return `<div class="${cls}" data-id="${f.id}"
         onclick="selectFile(event,${f.id})" ondblclick="openFile(${f.id})" oncontextmenu="openCtx(event,${f.id})">
@@ -2654,6 +2765,7 @@
 
     function clearSelection() {
       selected.clear(); activeFile = null;
+      renderFiles();
       updateRibbon();
       document.getElementById('status-sel').style.display = 'none';
     }
@@ -2777,8 +2889,17 @@
       toast('📂', `Folder "${name}" created`, 'success');
     }
 
-    function starSelected() {
-      selected.forEach(id => { const f = files.find(f => f.id === id); if (f) f.starred = !f.starred; });
+    async function starSelected() {
+      for (const id of selected) {
+        const f = files.find(f => f.id === id);
+        if (f) {
+          f.starred = !f.starred;
+          if (window.electronAPI && window.electronAPI.dbInsertFile) {
+            try { await window.electronAPI.dbInsertFile(f); }
+            catch (e) { console.error("Failed to save star state", e); }
+          }
+        }
+      }
       renderFiles();
       toast('⭐', 'Updated starred files', 'info');
     }
@@ -3245,6 +3366,7 @@
     function cycleViewMode() {
       viewMode = viewMode === 'grid' ? 'list' : 'grid';
       document.getElementById('view-icon').textContent = viewMode === 'grid' ? '⊞' : '☰';
+      renderFiles();
       toast(viewMode === 'grid' ? '⊞' : '☰', `Switched to ${viewMode} view`, 'info');
     }
 
@@ -3290,7 +3412,7 @@
       // Get user info for the header
       try {
         const home = await window.electronAPI.getHomeDir();
-        const username = home.split('\\').pop() || home.split('/').pop();
+        const username = home.replace(/\\/g, '/').split('/').filter(Boolean).pop();
         const el = document.getElementById('sb-username');
         if (el && username) el.textContent = username;
       } catch (e) { }
@@ -3573,12 +3695,27 @@
       for (const group of Object.values(sizeGroups)) {
         if (group.length > 1) {
           // Mark all but the first as duplicates
-          group.slice(1).forEach(f => { if (!f.tags.includes('dup')) f.tags.push('dup'); });
+          group.slice(1).forEach(f => { if (!f.tags.includes('dup')) f.tags.push('dup'); f.isDuplicate = true; });
+        }
+      }
+
+      // Save to Local DB Index
+      if (window.electronAPI && window.electronAPI.dbClearIndex) {
+        try {
+          await window.electronAPI.dbClearIndex();
+          for (const f of realFiles) {
+            await window.electronAPI.dbInsertFile(f);
+          }
+        } catch (e) {
+          console.error("DB Error:", e);
         }
       }
 
       // PII scanning (async, runs in background)
       scanAllForPII(realFiles);
+
+      // sklearn AI classification (async, fire-and-forget, updates cards live)
+      batchClassifyAI(realFiles);
 
       files = [...realFiles];
 
@@ -3849,7 +3986,7 @@
         micActive = false;
         btn.classList.remove('recording');
         btn.textContent = '🎤';
-        toast('⚠️', 'Voice input error', 'error');
+        toast('🎙️', 'Voice input error: OS microphone permission denied.', 'error');
       };
       micRecognition.onend = () => {
         micActive = false;
@@ -4016,20 +4153,20 @@
       if (selected.size === 1) {
         const f = selectedFiles[0];
         addChatBubble(`
-      < div class="file-chip" >
+      <div class="file-chip">
           <span class="fc-icon">${f.icon}</span>
           <span class="fc-name">${f.name}</span>
           <span style="font-size:0.65rem;color:var(--muted);margin-left:4px;">${f.size}</span>
-        </div >
+        </div>
       `, 'ai-chip');
 
         setTimeout(() => {
-          addChatBubble(`Selected < b > ${f.name}</b >.What would you like to do? `, 'ai');
+          addChatBubble(`Selected <b>${f.name}</b>. What would you like to do?`, 'ai');
         }, 200);
 
       } else {
         addChatBubble(`
-      < div style = "display:flex;flex-direction:column;gap:4px;" >
+      <div style="display:flex;flex-direction:column;gap:4px;">
       ${selectedFiles.slice(0, 3).map(f => `
             <div class="file-chip">
               <span class="fc-icon">${f.icon}</span>
@@ -4038,17 +4175,58 @@
           `).join('')
           }
           ${selected.size > 3 ? `<div style="font-size:0.75rem;color:var(--muted);margin-top:4px;">+${selected.size - 3} more</div>` : ''}
-        </div >
+        </div>
       `, 'ai-chip');
 
         setTimeout(() => {
-          addChatBubble(`${selected.size} files selected.Want me to summarize, organize, or find duplicates among them ? `, 'ai');
+          addChatBubble(`${selected.size} files selected. Want me to summarize, organize, or find duplicates among them?`, 'ai');
         }, 200);
       }
     }
 
     // ══ AI CHATBOT FUNCTIONALITY ══
-    function sendMessage() {
+
+    // Build sklearn classification context for Gemini
+    function buildClassificationContext() {
+      const classified = files.filter(f => f.aiCategory && !f.isDirectory);
+      const categories = {};
+      for (const f of classified) {
+        if (!categories[f.aiCategory]) categories[f.aiCategory] = [];
+        categories[f.aiCategory].push({ name: f.name, confidence: f.aiConfidence });
+      }
+      // Build summary string
+      const summaryParts = Object.entries(categories)
+        .sort((a, b) => b[1].length - a[1].length)
+        .map(([cat, items]) => `${items.length} ${cat}`);
+      return {
+        classifiedFiles: categories,
+        classificationSummary: summaryParts.length ? summaryParts.join(', ') : 'No files classified yet'
+      };
+    }
+
+    // Execute an action returned by Gemini
+    function executeGeminiAction(action) {
+      if (!action || !action.type) return;
+      if (action.type === 'filter' && action.category) {
+        const cat = action.category.toLowerCase();
+        const matching = files.filter(f => f.aiCategory === cat);
+        if (matching.length > 0) {
+          currentView = 'search';
+          VIEWS.search = { title: `🤖 AI: "${cat}" files`, filter: f => f.aiCategory === cat };
+          document.getElementById('view-title').textContent = `🤖 AI: "${cat}" files`;
+          renderFiles(f => f.aiCategory === cat);
+          toast('🤖', `Showing ${matching.length} files classified as "${cat}"`, 'info');
+        } else {
+          toast('🤖', `No files classified as "${cat}" in current view`, 'info');
+        }
+      } else if (action.type === 'sort_by_category') {
+        files.sort((a, b) => (a.aiCategory || 'zzz').localeCompare(b.aiCategory || 'zzz'));
+        renderFiles();
+        toast('🤖', 'Files sorted by AI category', 'info');
+      }
+    }
+
+    async function sendMessage() {
       const input = document.getElementById('chat-input');
       const message = input.value.trim();
       if (!message) return;
@@ -4058,15 +4236,42 @@
 
       showTypingIndicator();
 
-      setTimeout(() => {
-        hideTypingIndicator();
+      // Try real Gemini first, fall back to rule-based
+      let geminiReply = null;
+      let geminiAction = null;
+      if (window.electronAPI && window.electronAPI.aiChat) {
+        try {
+          const classCtx = buildClassificationContext();
+          const context = {
+            currentDirectory,
+            fileCount: files.length,
+            selectedFiles: [...selected].map(id => { const f = files.find(f => f.id === id); return f ? f.name : null; }).filter(Boolean),
+            dupCount: files.filter(f => f.tags.includes('dup')).length,
+            piiCount: files.filter(f => f.hasPII).length,
+            classifiedFiles: classCtx.classifiedFiles,
+            classificationSummary: classCtx.classificationSummary
+          };
+          const result = await window.electronAPI.aiChat({ message, context });
+          if (result && typeof result === 'object') {
+            geminiReply = result.reply;
+            geminiAction = result.action || null;
+          } else {
+            geminiReply = result;
+          }
+        } catch (e) { /* fall through to rule-based */ }
+      }
+
+      hideTypingIndicator();
+
+      if (geminiReply) {
+        addChatBubble(geminiReply, 'ai');
+        if (geminiAction) executeGeminiAction(geminiAction);
+      } else {
+        // Fallback: rule-based keyword response
         const response = generateAIResponse(message);
         addChatBubble(response.text, 'ai');
-
-        if (response.action) {
-          setTimeout(response.action, 300);
-        }
-      }, 800 + Math.random() * 600);
+        if (response.action) setTimeout(response.action, 300);
+      }
     }
 
     function sendQuickPrompt(prompt) {
@@ -4081,28 +4286,21 @@
       if (type === 'ai-chip') {
         const bubble = document.createElement('div');
         bubble.className = 'chat-bubble ai';
-        bubble.innerHTML = `
-      < div class="chat-avatar" >✨</div >
-        <div class="chat-content">${text}</div>
-    `;
+        bubble.innerHTML = `<div class="chat-avatar">✨</div><div class="chat-content"></div>`;
+        bubble.querySelector('.chat-content').innerHTML = text;
         messagesDiv.appendChild(bubble);
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
         return;
       }
 
       const bubble = document.createElement('div');
-      bubble.className = `chat - bubble ${type} `;
+      bubble.className = `chat-bubble ${type}`;
 
       const avatar = type === 'ai' ? '✨' : '👤';
       const time = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
-      bubble.innerHTML = `
-      < div class="chat-avatar" > ${avatar}</div >
-        <div class="chat-content">
-          <div class="chat-text">${text}</div>
-          <div class="chat-time">${time}</div>
-        </div>
-    `;
+      bubble.innerHTML = `<div class="chat-avatar">${avatar}</div><div class="chat-content"><div class="chat-text"></div><div class="chat-time">${time}</div></div>`;
+      bubble.querySelector('.chat-text').innerHTML = text;
 
       messagesDiv.appendChild(bubble);
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -4114,7 +4312,7 @@
       indicator.className = 'chat-bubble ai';
       indicator.id = 'typing-indicator';
       indicator.innerHTML = `
-      < div class="chat-avatar" >✨</div >
+      <div class="chat-avatar">✨</div>
         <div class="chat-content">
           <div class="chat-text">
             <div class="typing-indicator">
@@ -4137,11 +4335,56 @@
     function generateAIResponse(message) {
       const lower = message.toLowerCase();
 
+      // ── sklearn AI category filtering (works without Gemini) ──
+      const categoryKeywords = {
+        work: ['work', 'work files', 'office', 'business', 'professional'],
+        personal: ['personal', 'personal files', 'my files', 'private'],
+        media: ['media', 'media files', 'photos', 'images', 'videos', 'audio', 'music', 'pictures'],
+        code: ['code', 'code files', 'programming', 'scripts', 'source'],
+        archive: ['archive', 'archives', 'zip', 'compressed', 'backup'],
+        other: ['other', 'system', 'binary', 'unknown']
+      };
+
+      // Check for "show/find/filter [category]" patterns
+      const showPatterns = ['show', 'find', 'filter', 'list', 'display', 'get', 'give me', 'open'];
+      const isShowRequest = showPatterns.some(p => lower.includes(p));
+
+      for (const [cat, keywords] of Object.entries(categoryKeywords)) {
+        if (keywords.some(kw => lower.includes(kw))) {
+          const matching = files.filter(f => f.aiCategory === cat);
+          if (matching.length > 0 && isShowRequest) {
+            return {
+              text: `Found ${matching.length} files classified as <strong>${cat}</strong> by the AI model. Filtering now!`,
+              action: () => executeGeminiAction({ type: 'filter', category: cat })
+            };
+          } else if (matching.length > 0) {
+            const names = matching.slice(0, 5).map(f => f.name).join(', ');
+            const extra = matching.length > 5 ? ` and ${matching.length - 5} more` : '';
+            return {
+              text: `I found ${matching.length} <strong>${cat}</strong> files: ${names}${extra}. Say "show ${cat} files" to filter the view!`
+            };
+          } else {
+            return { text: `No files classified as "${cat}" in the current folder. Try navigating to a different directory.` };
+          }
+        }
+      }
+
+      // Classification summary / breakdown
+      if (lower.includes('classify') || lower.includes('classificat') || lower.includes('what type') || lower.includes('breakdown') || lower.includes('categories')) {
+        const ctx = buildClassificationContext();
+        if (ctx.classificationSummary !== 'No files classified yet') {
+          return {
+            text: `📊 <strong>AI Classification Breakdown:</strong><br>${ctx.classificationSummary.split(', ').map(s => `• ${s}`).join('<br>')}<br><br>Ask me to "show [category] files" to filter!`
+          };
+        }
+        return { text: `No files have been classified yet. Navigate to a folder and wait for the 🤖 badges to appear.` };
+      }
+
       // Duplicates
       if (lower.includes('duplicate') || lower.includes('dupes')) {
         const dupCount = files.filter(f => f.tags.includes('dup')).length;
         return {
-          text: `I found ${dupCount} duplicate files taking up ~18 MB.Would you like me to show them ? `,
+          text: `I found ${dupCount} duplicate files taking up ~18 MB. Would you like me to show them?`,
           action: () => showDuplicates()
         };
       }
@@ -4150,7 +4393,7 @@
       if (lower.includes('large') || lower.includes('big') || lower.includes('size')) {
         const largeFiles = files.filter(f => parseFloat(f.size) > 10).length;
         return {
-          text: `I found ${largeFiles} files larger than 10 MB.Sorting by size now...`,
+          text: `I found ${largeFiles} files larger than 10 MB. Sorting by size now...`,
           action: () => { sortMode = 2; document.getElementById('sort-label').textContent = 'Size'; renderFiles(); }
         };
       }
@@ -4163,8 +4406,8 @@
         };
       }
 
-      // Recent work
-      if (lower.includes('recent') || lower.includes('today') || lower.includes('work')) {
+      // Recent
+      if (lower.includes('recent') || lower.includes('today')) {
         const recentCount = files.filter(f => f.date.includes('Today') || f.date.includes('Yesterday')).length;
         return {
           text: `You worked on ${recentCount} files recently. Let me show you the Recent view.`,
@@ -4252,12 +4495,23 @@
         };
       }
 
-      // Summarize / selected file
+      // Summarize / selected file → real Gemini call
       if (lower.includes('summarize') && activeFile) {
         const f = files.find(f => f.id === activeFile);
-        return {
-          text: `I would summarize ${f.name} here. In the real app, this would use AI to extract key information from the file contents.`
-        };
+        if (f && f.path && window.electronAPI && window.electronAPI.aiSummarize) {
+          // Kick off async and return a placeholder; update bubble when done
+          (async () => {
+            try {
+              const head = await window.electronAPI.readFileHead(f.path, 4000);
+              const summary = await window.electronAPI.aiSummarize({ filename: f.name, content_snippet: head || '' });
+              addChatBubble(summary || `Could not summarize ${f.name}.`, 'ai');
+            } catch (e) {
+              addChatBubble(`Summary failed for ${f.name}: ${e.message}`, 'ai');
+            }
+          })();
+          return { text: `⏳ Summarizing <strong>${f.name}</strong> with Gemini AI…` };
+        }
+        return { text: `I would summarize ${f ? f.name : 'the file'} here — browse to a real file to enable AI summarization.` };
       }
 
       // Default response
