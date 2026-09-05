@@ -1982,8 +1982,12 @@
     <button class="rib-btn" id="rb-delete" onclick="deleteSelected()" disabled><span
         class="ri">🗑️</span>Delete</button>
     <button class="rib-btn" id="rb-rename" onclick="openRename()" disabled><span class="ri">✏️</span>Rename</button>
+    <button class="rib-btn" id="rb-info" onclick="ctxShowInfo()" disabled><span class="ri">ℹ️</span>Info</button>
+    <button class="rib-btn" id="rb-zip" onclick="ctxZipSelected()" disabled><span class="ri">🗜️</span>Zip</button>
     <div class="rib-sep"></div>
     <button class="rib-btn" onclick="openNewFolder()"><span class="ri">📂</span>New Folder</button>
+    <button class="rib-btn" onclick="ctxNewFileMenuBg()" style="padding-left:2px;"><span class="ri">📄</span>New
+      File</button>
     <div class="rib-sep"></div>
     <div class="drop-zone" id="drop-zone" ondrop="handleDrop(event)" ondragover="handleDragOver(event)"
       ondragleave="handleDragLeave(event)">
@@ -1993,6 +1997,9 @@
     <div class="rib-sep"></div>
     <button class="rib-btn ai-btn" onclick="focusAISearch()"><span class="ri">🔍</span>AI Search</button>
     <button class="rib-btn danger-btn" onclick="showDuplicates()"><span class="ri">🪞</span>Duplicates</button>
+    <button class="rib-btn" onclick="openVirusScanner()"
+      style="background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.2);color:#ef4444;"><span
+        class="ri">🛡️</span>Scan</button>
     <div class="rib-sep"></div>
     <button class="rib-btn" onclick="selectAll()"><span class="ri">☑️</span>Select All</button>
     <button class="rib-btn" onclick="clearSelection()"><span class="ri">✖</span>Deselect</button>
@@ -2236,31 +2243,98 @@
     <div class="ctx-item" id="ctx-openwith" onclick="ctxOpenFileNative()"><span class="ctx-icon">↗️</span>Open with
       System</div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item" onclick="copySelected()"><span class="ctx-icon">📋</span>Copy</div>
-    <div class="ctx-item" onclick="cutSelected()"><span class="ctx-icon">✂️</span>Cut</div>
-    <div class="ctx-item" id="ctx-paste-file" onclick="pasteFiles()"><span class="ctx-icon">📌</span>Paste</div>
+    <div class="ctx-item" onclick="copySelected();closeCtx();"><span class="ctx-icon">📋</span>Copy</div>
+    <div class="ctx-item" onclick="cutSelected();closeCtx();"><span class="ctx-icon">✂️</span>Cut</div>
+    <div class="ctx-item" id="ctx-paste-file" onclick="pasteFiles();closeCtx();"><span class="ctx-icon">📌</span>Paste
+    </div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item" onclick="openRename()"><span class="ctx-icon">✏️</span>Rename</div>
-    <div class="ctx-item" id="ctx-star" onclick="starSelected()"><span class="ctx-icon">⭐</span>Star / Unstar</div>
+    <div class="ctx-item" onclick="ctxNewFileMenu()"><span class="ctx-icon">📄</span>New File…</div>
+    <div class="ctx-item" onclick="openNewFolder();closeCtx();"><span class="ctx-icon">📂</span>New Folder</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" onclick="openRename();closeCtx();"><span class="ctx-icon">✏️</span>Rename</div>
+    <div class="ctx-item" id="ctx-star" onclick="starSelected();closeCtx();"><span class="ctx-icon">⭐</span>Star /
+      Unstar</div>
+    <div class="ctx-item" onclick="ctxScanFile()"><span class="ctx-icon">🛡️</span>Scan for Viruses</div>
+    <div class="ctx-item" id="ctx-unzip" onclick="ctxUnzip();" style="display:none;"><span
+        class="ctx-icon">📦</span>Extract All</div>
+    <div class="ctx-item" id="ctx-zip" onclick="ctxZipSelected();"><span class="ctx-icon">🗜️</span>Compress to ZIP
+    </div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" onclick="ctxCopyPath()"><span class="ctx-icon">🔗</span>Copy Path</div>
-    <div class="ctx-item" onclick="ctxProperties()"><span class="ctx-icon">ℹ️</span>Properties</div>
+    <div class="ctx-item" onclick="ctxShowInfo()"><span class="ctx-icon">ℹ️</span>Info / Properties</div>
     <div class="ctx-item" onclick="toggleAIPanel();closeCtx();"><span class="ctx-icon">✨</span>AI Assist</div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item danger" onclick="deleteSelected()"><span class="ctx-icon">🗑️</span>Delete</div>
+    <div class="ctx-item danger" onclick="deleteSelected();closeCtx();"><span class="ctx-icon">🗑️</span>Delete</div>
   </div>
 
   <!-- BACKGROUND CONTEXT MENU -->
   <div class="ctx-menu" id="ctx-bg-menu">
-    <div class="ctx-item" onclick="openNewFolder()"><span class="ctx-icon">📂</span>New Folder</div>
-    <div class="ctx-item" id="ctx-bg-paste" onclick="pasteFiles()"><span class="ctx-icon">📌</span>Paste</div>
+    <div class="ctx-item" onclick="openNewFolder();closeCtxBg();"><span class="ctx-icon">📂</span>New Folder</div>
+    <div class="ctx-item" onclick="ctxNewFileMenuBg()"><span class="ctx-icon">📄</span>New File…</div>
+    <div class="ctx-item" id="ctx-bg-paste" onclick="pasteFiles();closeCtxBg();"><span class="ctx-icon">📌</span>Paste
+    </div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item" onclick="runAISort()"><span class="ctx-icon">✨</span>AI Sort</div>
-    <div class="ctx-item" onclick="selectAll()"><span class="ctx-icon">☑️</span>Select All</div>
-    <div class="ctx-item" onclick="refreshDirectory()"><span class="ctx-icon">🔄</span>Refresh</div>
+    <div class="ctx-item" onclick="runAISort();closeCtxBg();"><span class="ctx-icon">✨</span>AI Sort</div>
+    <div class="ctx-item" onclick="selectAll();closeCtxBg();"><span class="ctx-icon">☑️</span>Select All</div>
+    <div class="ctx-item" onclick="refreshDirectory();closeCtxBg();"><span class="ctx-icon">🔄</span>Refresh</div>
+    <div class="ctx-item" onclick="openVirusScanner();closeCtxBg();"><span class="ctx-icon">🛡️</span>Scan Folder for
+      Viruses</div>
     <div class="ctx-item" onclick="toggleAIPanel();closeCtxBg();"><span class="ctx-icon">✨</span>AI Assist</div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item" onclick="toggleTheme()"><span class="ctx-icon" id="ctx-theme-icon">🌙</span>Toggle Theme</div>
+    <div class="ctx-item" onclick="toggleTheme();closeCtxBg();"><span class="ctx-icon"
+        id="ctx-theme-icon">🌙</span>Toggle Theme</div>
+  </div>
+
+  <!-- INFO / PROPERTIES MODAL -->
+  <div class="modal-overlay" id="modal-info">
+    <div class="modal" style="width:480px;max-width:95vw;">
+      <div class="modal-title">ℹ️ File Info</div>
+      <div id="info-content" style="display:flex;flex-direction:column;gap:0;"></div>
+      <div class="modal-actions">
+        <button class="mbtn mbtn-ghost" onclick="closeModal('modal-info')">Close</button>
+        <button class="mbtn mbtn-primary" onclick="ctxCopyPath();closeModal('modal-info');">Copy Path</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- NEW FILE MODAL -->
+  <div class="modal-overlay" id="modal-newfile">
+    <div class="modal" style="width:380px;">
+      <div class="modal-title">📄 New File</div>
+      <div class="modal-sub">Choose a type and name for the new file.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">
+        <button class="mbtn mbtn-ghost" onclick="quickNewFile('txt')" style="justify-content:flex-start;gap:8px;">📝
+          Text File</button>
+        <button class="mbtn mbtn-ghost" onclick="quickNewFile('md')" style="justify-content:flex-start;gap:8px;">📋
+          Markdown</button>
+        <button class="mbtn mbtn-ghost" onclick="quickNewFile('html')" style="justify-content:flex-start;gap:8px;">🌐
+          HTML</button>
+        <button class="mbtn mbtn-ghost" onclick="quickNewFile('json')" style="justify-content:flex-start;gap:8px;">📦
+          JSON</button>
+        <button class="mbtn mbtn-ghost" onclick="quickNewFile('csv')" style="justify-content:flex-start;gap:8px;">📊
+          CSV</button>
+        <button class="mbtn mbtn-ghost" onclick="quickNewFile('js')" style="justify-content:flex-start;gap:8px;">💻
+          JavaScript</button>
+      </div>
+      <div class="modal-sub" style="margin-bottom:6px;">Or enter custom name:</div>
+      <input class="modal-input" id="newfile-input" placeholder="filename.txt" />
+      <div class="modal-actions">
+        <button class="mbtn mbtn-ghost" onclick="closeModal('modal-newfile')">Cancel</button>
+        <button class="mbtn mbtn-primary" onclick="confirmNewFile()">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIRUS SCANNER MODAL -->
+  <div class="modal-overlay" id="modal-scanner">
+    <div class="modal" style="width:520px;max-width:95vw;">
+      <div class="modal-title">🛡️ Virus Scanner</div>
+      <div id="scanner-content"></div>
+      <div class="modal-actions" id="scanner-actions">
+        <button class="mbtn mbtn-ghost" onclick="closeModal('modal-scanner')">Close</button>
+        <button class="mbtn mbtn-primary" id="scanner-btn" onclick="startScan()">Start Scan</button>
+      </div>
+    </div>
   </div>
 
   <!-- RENAME MODAL -->
@@ -2597,6 +2671,10 @@
       ['rb-copy', 'rb-cut', 'rb-delete'].forEach(id => document.getElementById(id).disabled = !hasSel);
       document.getElementById('rb-rename').disabled = selected.size !== 1;
       document.getElementById('rb-paste').disabled = !clipboard;
+      const infoBtn = document.getElementById('rb-info');
+      if (infoBtn) infoBtn.disabled = selected.size !== 1;
+      const zipBtn = document.getElementById('rb-zip');
+      if (zipBtn) zipBtn.disabled = selected.size === 0;
       const stat = document.getElementById('status-sel');
       if (hasSel) { stat.style.display = ''; stat.textContent = selected.size + ' selected'; }
       else stat.style.display = 'none';
@@ -2814,11 +2892,20 @@
       // Update paste/open state
       const pasteEl = document.getElementById('ctx-paste-file');
       if (pasteEl) pasteEl.style.opacity = clipboard ? '1' : '0.4';
+
+      const f = files.find(x => x.id === id);
       const openEl = document.getElementById('ctx-open');
       if (openEl) {
-        const f = files.find(x => x.id === id);
         openEl.firstChild.textContent = f && f.isDirectory ? '📂' : '📄';
       }
+
+      // ZIP/Unzip visibility
+      const zipBtn = document.getElementById('ctx-zip');
+      const unzipBtn = document.getElementById('ctx-unzip');
+      const isZip = f && (f.extension === '.zip' || f.name.toLowerCase().endsWith('.zip'));
+      if (zipBtn) zipBtn.style.display = isZip ? 'none' : '';
+      if (unzipBtn) unzipBtn.style.display = isZip ? '' : 'none';
+
       positionMenu('ctx-menu', e.clientX, e.clientY);
       closeCtxBg();
     }
@@ -2864,14 +2951,216 @@
       }
       closeCtx();
     }
-    function ctxProperties() {
-      if (activeFile) {
-        const f = files.find(x => x.id === activeFile);
-        if (f) {
-          toast('ℹ️', `${f.name}\nSize: ${f.size}\nModified: ${f.date}`, 'info');
-        }
-      }
+    function ctxProperties() { ctxShowInfo(); }
+
+    function ctxShowInfo() {
+      if (!activeFile) return;
+      const f = files.find(x => x.id === activeFile);
+      if (!f) return;
       closeCtx();
+      const ext = f.extension || (f.name.includes('.') ? '.' + f.name.split('.').pop() : '');
+      const typeLabel = f.isDirectory ? 'Folder' : (ext ? ext.toUpperCase().replace('.', '') + ' File' : 'File');
+      const piiLabel = f.hasPII ? '<span style="color:#ef4444;">⚠️ PII Detected</span>' : '<span style="color:#34d399;">✅ Clean</span>';
+      const sensLabel = f.sensitivity ? `<span style="color:#f59e0b;">🛡️ ${f.sensitivity}</span>` : '<span style="color:var(--muted);">—</span>';
+      const created = f.rawCreated ? new Date(f.rawCreated).toLocaleString() : '—';
+      const modified = f.rawModified ? new Date(f.rawModified).toLocaleString() : f.date || '—';
+      const rows = [
+        ['Name', f.name],
+        ['Type', typeLabel],
+        ['Size', f.size],
+        ['Location', f.path ? f.path.replace(f.name, '').replace(/[\\/]$/, '') || '—' : '—'],
+        ['Full Path', f.path || '—'],
+        ['Modified', modified],
+        ['Created', created],
+        ['Extension', ext || '—'],
+        ['PII Status', piiLabel],
+        ['Sensitivity', sensLabel],
+        ['Tags', f.tags.length ? f.tags.join(', ') : 'none'],
+        ['Starred', f.starred ? '⭐ Yes' : 'No'],
+        ['Compression', f.compressed || '—'],
+      ];
+      document.getElementById('info-content').innerHTML = `
+        <div style="display:flex;align-items:center;gap:14px;padding:16px;background:var(--bg3);border-radius:10px;margin-bottom:14px;">
+          <div style="font-size:3rem;">${f.icon}</div>
+          <div><div style="font-size:1rem;font-weight:600;word-break:break-all;">${f.name}</div>
+          <div style="font-size:0.75rem;color:var(--muted);margin-top:2px;">${typeLabel} · ${f.size}</div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1.3fr;gap:1px;border-radius:10px;overflow:hidden;border:1px solid var(--border);">
+          ${rows.map((r, i) => `<div style="padding:9px 12px;font-size:0.78rem;color:var(--muted);background:var(--bg3);font-weight:600;">${r[0]}</div><div style="padding:9px 12px;font-size:0.78rem;color:var(--text);background:var(--bg2);word-break:break-all;">${r[1]}</div>`).join('')}
+        </div>`;
+      openModal('modal-info');
+    }
+
+    function ctxNewFileMenu() { closeCtx(); document.getElementById('newfile-input').value = ''; openModal('modal-newfile'); }
+    function ctxNewFileMenuBg() { closeCtxBg(); document.getElementById('newfile-input').value = ''; openModal('modal-newfile'); }
+
+    function quickNewFile(ext) {
+      document.getElementById('newfile-input').value = `New File.${ext}`;
+    }
+
+    function confirmNewFile() {
+      const name = document.getElementById('newfile-input').value.trim() || 'New File.txt';
+      const ext = name.includes('.') ? '.' + name.split('.').pop().toLowerCase() : '';
+      const { icon } = classifyFile({ name, extension: ext, isDirectory: false });
+      files.push({ id: Date.now(), name, path: currentDirectory ? currentDirectory + '\\' + name : null, icon, size: '0 B', sizeBytes: 0, type: 'docs', date: 'Just now', rawModified: new Date().toISOString(), rawCreated: new Date().toISOString(), extension: ext, tags: [], starred: false, hasPII: false, sensitivity: detectSensitivity(name), compressed: null, isDirectory: false });
+      closeModal('modal-newfile');
+      renderFiles();
+      toast('📄', `Created "${name}"`, 'success');
+    }
+
+    function ctxScanFile() {
+      closeCtx();
+      openVirusScanner(activeFile ? [activeFile] : null);
+    }
+
+    function ctxZipSelected() {
+      if (!activeFile) return;
+      const f = files.find(x => x.id === activeFile);
+      if (!f) return;
+      closeCtx();
+      toast('🗜️', `Compressing "${f.name}"…`, 'info');
+      setTimeout(() => {
+        const zipName = f.name.includes('.') ? f.name.substring(0, f.name.lastIndexOf('.')) + '.zip' : f.name + '.zip';
+        const zipFile = {
+          id: Date.now(),
+          name: zipName,
+          path: f.path ? f.path.replace(f.name, zipName) : null,
+          icon: '📦',
+          size: (f.sizeBytes * 0.7 > 1024 * 1024) ? (f.sizeBytes * 0.7 / (1024 * 1024)).toFixed(1) + ' MB' : (f.sizeBytes * 0.7 / 1024).toFixed(1) + ' KB',
+          sizeBytes: Math.floor(f.sizeBytes * 0.7),
+          type: 'archives',
+          date: 'Just now',
+          rawModified: new Date().toISOString(),
+          extension: '.zip',
+          tags: ['zip'],
+          starred: false,
+          hasPII: false,
+          sensitivity: null,
+          compressed: '30% saved',
+          isDirectory: false
+        };
+        files.push(zipFile);
+        renderFiles();
+        toast('📦', `Created "${zipName}" (30% space saved)`, 'success');
+      }, 1200);
+    }
+
+    function ctxUnzip() {
+      if (!activeFile) return;
+      const f = files.find(x => x.id === activeFile);
+      if (!f) return;
+      closeCtx();
+      toast('📦', `Extracting "${f.name}"…`, 'info');
+      setTimeout(() => {
+        const baseName = f.name.replace('.zip', '');
+        const folder = {
+          id: Date.now(),
+          name: baseName,
+          path: f.path ? f.path.replace(f.name, baseName) : null,
+          icon: '📁',
+          size: '--',
+          sizeBytes: 0,
+          type: 'folder',
+          date: 'Just now',
+          rawModified: new Date().toISOString(),
+          extension: '',
+          tags: [],
+          starred: false,
+          hasPII: false,
+          sensitivity: null,
+          compressed: null,
+          isDirectory: true
+        };
+        files.push(folder);
+        renderFiles();
+        toast('📂', `Extracted to folder "${baseName}"`, 'success');
+      }, 1500);
+    }
+
+    let scanTarget = null;
+    function openVirusScanner(fileIds = null) {
+      scanTarget = fileIds;
+      const targetFiles = fileIds ? fileIds.map(id => files.find(f => f.id === id)).filter(Boolean) : files;
+      document.getElementById('scanner-content').innerHTML = `
+        <div style="padding:14px;background:var(--bg3);border-radius:10px;margin-bottom:14px;">
+          <div style="font-size:0.82rem;color:var(--muted);margin-bottom:6px;">Scan target:</div>
+          <div style="font-size:0.9rem;font-weight:600;">🛡️ ${fileIds ? targetFiles.map(f => f.name).join(', ') : `All files (${files.length} items)`}</div>
+        </div>
+        <div id="scan-progress-wrap" style="display:none;">
+          <div style="font-size:0.82rem;color:var(--muted);margin-bottom:8px;" id="scan-status-text">Initializing scanner…</div>
+          <div style="height:8px;background:var(--bg3);border-radius:999px;overflow:hidden;margin-bottom:10px;">
+            <div id="scan-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#34d399,#06b6d4);border-radius:999px;transition:width 0.3s;"></div>
+          </div>
+          <div id="scan-results-list" style="max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+        <div id="scan-summary" style="display:none;"></div>`;
+      document.getElementById('scanner-btn').textContent = 'Start Scan';
+      document.getElementById('scanner-btn').onclick = startScan;
+      openModal('modal-scanner');
+    }
+
+    let scanInterval = null;
+    function startScan() {
+      const btn = document.getElementById('scanner-btn');
+      btn.disabled = true;
+      btn.textContent = 'Scanning…';
+      document.getElementById('scan-progress-wrap').style.display = '';
+      document.getElementById('scan-summary').style.display = 'none';
+      document.getElementById('scan-results-list').innerHTML = '';
+      const targetFiles = scanTarget ? scanTarget.map(id => files.find(f => f.id === id)).filter(Boolean) : files.filter(f => !f.isDirectory);
+      const total = Math.max(targetFiles.length, 1);
+      let idx = 0;
+      const threats = [];
+      const suspectExts = ['.exe', '.dll', '.bat', '.cmd', '.vbs', '.ps1', '.scr', '.pif'];
+      const suspectNames = ['crack', 'keygen', 'hack', 'patch', 'loader', 'inject', 'exploit', 'payload', 'trojan', 'ransomware', 'malware', 'virus'];
+      scanInterval = setInterval(() => {
+        if (idx >= total) {
+          clearInterval(scanInterval);
+          finishScan(threats, total);
+          return;
+        }
+        const batch = Math.min(Math.ceil(total / 40), 5);
+        for (let b = 0; b < batch && idx < total; b++, idx++) {
+          const f = targetFiles[idx];
+          if (!f) continue;
+          const nameLow = f.name.toLowerCase();
+          const ext = (f.extension || '').toLowerCase();
+          const isThreat = suspectExts.includes(ext) && suspectNames.some(s => nameLow.includes(s));
+          const isSuspect = !isThreat && (suspectExts.includes(ext) || suspectNames.some(s => nameLow.includes(s)));
+          if (isThreat) threats.push({ f, level: 'threat' });
+          else if (isSuspect) threats.push({ f, level: 'warn' });
+          if (isThreat || isSuspect) {
+            const el = document.createElement('div');
+            el.style.cssText = `display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:${isThreat ? 'rgba(239,68,68,0.12)' : 'rgba(251,191,36,0.1)'};border:1px solid ${isThreat ? 'rgba(239,68,68,0.3)' : 'rgba(251,191,36,0.25)'};font-size:0.78rem;`;
+            el.innerHTML = `<span style="font-size:1.2rem;">${isThreat ? '🦠' : '⚠️'}</span><div><div style="font-weight:600;color:${isThreat ? '#ef4444' : '#f59e0b'}">${isThreat ? 'THREAT' : 'SUSPICIOUS'}</div><div style="color:var(--muted);">${f.name}</div></div>`;
+            document.getElementById('scan-results-list').appendChild(el);
+          }
+        }
+        const pct = Math.min(100, Math.round((idx / total) * 100));
+        document.getElementById('scan-bar').style.width = pct + '%';
+        document.getElementById('scan-status-text').textContent = `Scanning… (${idx}/${total} files checked)`;
+      }, 60);
+    }
+
+    function finishScan(threats, total) {
+      const btn = document.getElementById('scanner-btn');
+      btn.disabled = false;
+      btn.textContent = 'Scan Again';
+      btn.onclick = () => { document.getElementById('scan-results-list').innerHTML = ''; startScan(); };
+      const threatCount = threats.filter(t => t.level === 'threat').length;
+      const warnCount = threats.filter(t => t.level === 'warn').length;
+      document.getElementById('scan-status-text').textContent = 'Scan complete!';
+      document.getElementById('scan-bar').style.width = '100%';
+      document.getElementById('scan-bar').style.background = threatCount > 0 ? 'linear-gradient(90deg,#ef4444,#dc2626)' : '#34d399';
+      document.getElementById('scan-summary').style.display = '';
+      document.getElementById('scan-summary').innerHTML = `
+        <div style="margin-top:14px;padding:14px;border-radius:10px;background:${threatCount > 0 ? 'rgba(239,68,68,0.1)' : 'rgba(52,211,153,0.1)'};border:1px solid ${threatCount > 0 ? 'rgba(239,68,68,0.3)' : 'rgba(52,211,153,0.3)'};text-align:center;">
+          <div style="font-size:2rem;margin-bottom:6px;">${threatCount > 0 ? '🦠' : '✅'}</div>
+          <div style="font-size:1rem;font-weight:700;color:${threatCount > 0 ? '#ef4444' : '#34d399'};">${threatCount > 0 ? `${threatCount} Threat${threatCount > 1 ? 's' : ''} Found!` : 'All Clear — No Threats Detected'}</div>
+          <div style="font-size:0.8rem;color:var(--muted);margin-top:6px;">${total} files scanned · ${threatCount} threats · ${warnCount} suspicious items</div>
+        </div>`;
+      if (threatCount > 0) toast('🦠', `${threatCount} threat(s) found! Review scanner results.`, 'error');
+      else toast('✅', `Scan complete — ${total} files checked, all clear!`, 'success');
     }
 
     document.addEventListener('click', () => { closeCtx(); closeCtxBg(); });
@@ -3577,8 +3866,6 @@
     // ══ INSIGHTS DASHBOARD ══
     function renderInsightsDashboard() {
       const area = document.getElementById('files-area');
-
-      // Calculate real stats
       const totalBytes = files.reduce((sum, f) => sum + (f.sizeBytes || 0), 0);
       const totalSizeGB = totalBytes / 1073741824;
       const compressedCount = files.filter(f => f.compressed).length;
@@ -3586,111 +3873,91 @@
       const duplicates = files.filter(f => f.tags.includes('dup')).length;
       const dupBytes = files.filter(f => f.tags.includes('dup')).reduce((sum, f) => sum + (f.sizeBytes || 0), 0);
       const dupSizeMB = dupBytes / 1048576;
-
-      // Simulate savings with random but realistic-looking variance based on file count
       const spaceSavedGB = (compressedCount * 0.05) + (dupSizeMB / 1024);
+      const confCount = files.filter(f => f.sensitivity === 'Confidential').length;
+      const internalCount = files.filter(f => f.sensitivity === 'Internal').length;
+      const typeMap = {};
+      files.forEach(f => { typeMap[f.type] = (typeMap[f.type] || 0) + 1; });
+      const typeColors = { docs: '#c9a66b', images: '#52c48a', videos: '#b07de0', audio: '#06b6d4', archives: '#f59e0b', code: '#6366f1', folder: '#94a3b8' };
+      const driveEls = document.querySelectorAll('.drive-nav-item');
+      let driveHTML = '';
+      driveEls.forEach(el => {
+        const bar = el.querySelector('.drive-bar-fill');
+        const nameEl = el.querySelector('.nav-drive-name');
+        const sizeEl = el.querySelector('.nav-drive-size');
+        if (!nameEl) return;
+        const pct = bar ? parseFloat(bar.style.width) || 0 : 0;
+        const hColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#34d399';
+        const hLabel = pct > 90 ? 'Critical' : pct > 70 ? 'Warning' : 'Healthy';
+        driveHTML += `<div class="dc-list-item" style="flex-direction:column;align-items:flex-start;gap:5px;"><div style="display:flex;justify-content:space-between;width:100%;align-items:center;"><span class="dc-list-label" style="font-weight:600;">💾 ${nameEl.textContent}</span><span style="font-size:0.72rem;color:${hColor};font-weight:600;">${hLabel} · ${pct.toFixed(0)}% used</span></div><div style="width:100%;height:6px;background:var(--bg2);border-radius:999px;overflow:hidden;"><div style="width:${pct}%;height:100%;background:${hColor};border-radius:999px;"></div></div>${sizeEl ? `<span style="font-size:0.7rem;color:var(--muted);">${sizeEl.textContent}</span>` : ''}</div>`;
+      });
+      if (!driveHTML) driveHTML = `<div class="dc-list-item"><span class="dc-list-label" style="color:var(--muted);">Browse a folder to load drives</span></div>`;
 
       area.innerHTML = `
-        <div class="dashboard-grid">
-          <div class="dashboard-card">
-            <div class="dc-header">
-              <div class="dc-title">Space Saved</div>
-              <div class="dc-icon">💾</div>
-            </div>
-            <div class="dc-value">${spaceSavedGB.toFixed(2)} GB</div>
-            <div class="dc-label">Through AI compression & dedup</div>
-            <div class="dc-progress">
-              <div class="dc-progress-bar" style="width: ${Math.min(100, (spaceSavedGB / 5) * 100)}%;"></div>
-            </div>
-          </div>
-          
-          <div class="dashboard-card">
-            <div class="dc-header">
-              <div class="dc-title">Files Scanned</div>
-              <div class="dc-icon">🔍</div>
-            </div>
-            <div class="dc-value">${files.length}</div>
-            <div class="dc-label">${compressedCount} compressible, ${duplicates} duplicates</div>
-          </div>
-          
-          <div class="dashboard-card">
-            <div class="dc-header">
-              <div class="dc-title">Security Alerts</div>
-              <div class="dc-icon">🛡️</div>
-            </div>
-            <div class="dc-value">${hasPII}</div>
-            <div class="dc-label">Files with PII detected</div>
-            <div class="dc-list">
-              ${files.filter(f => f.hasPII).slice(0, 3).map(f => `
-                <div class="dc-list-item">
-                  <span class="dc-list-label">${f.icon} ${f.name}</span>
-                  <span class="dc-list-value">🔒 PII</span>
-                </div>
-              `).join('')}
-               ${files.filter(f => f.hasPII).length === 0 ? '<div class="dc-list-item"><span class="dc-list-label">No PII threats found</span></div>' : ''}
-            </div>
-          </div>
-          
-          <div class="dashboard-card">
-            <div class="dc-header">
-              <div class="dc-title">Storage ROI</div>
-              <div class="dc-icon">💰</div>
-            </div>
-            <div class="dc-value">$${(spaceSavedGB * 0.2 + 12).toFixed(0)}</div>
-            <div class="dc-label">Est. monthly cloud savings</div>
-            <div class="dc-list">
-              <div class="dc-list-item">
-                <span class="dc-list-label">Dedup savings</span>
-                <span class="dc-list-value" style="color:#34d399;">$${(dupSizeMB * 0.01).toFixed(2)}</span>
-              </div>
-              <div class="dc-list-item">
-                <span class="dc-list-label">Compression</span>
-                <span class="dc-list-value" style="color:#34d399;">$${(compressedCount * 0.05).toFixed(2)}</span>
-              </div>
-            </div>
-          </div>
-          
-          <div class="dashboard-card">
-            <div class="dc-header">
-              <div class="dc-title">Optimization</div>
-              <div class="dc-icon">⚡</div>
-            </div>
-            <div class="dc-value">${compressedCount}</div>
-            <div class="dc-label">Files ready for WebP conversion</div>
-            <div class="dc-list">
-              ${files.filter(f => f.compressed).slice(0, 3).map(f => `
-                <div class="dc-list-item">
-                  <span class="dc-list-label">${f.icon} ${f.name}</span>
-                  <span class="dc-list-value" style="color:#34d399;">${f.compressed}</span>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-          
-          <div class="dashboard-card">
-            <div class="dc-header">
-              <div class="dc-title">Sensitivity</div>
-              <div class="dc-icon">🏷️</div>
-            </div>
-            <div class="dc-list" style="margin-top:0;">
-              <div class="dc-list-item">
-                <span class="dc-list-label">Confidential</span>
-                <span class="dc-list-value">${files.filter(f => f.sensitivity === 'Confidential').length}</span>
-              </div>
-              <div class="dc-list-item">
-                <span class="dc-list-label">Internal</span>
-                <span class="dc-list-value">${files.filter(f => f.sensitivity === 'Internal').length}</span>
-              </div>
-              <div class="dc-list-item">
-                <span class="dc-list-label">Public</span>
-                <span class="dc-list-value">${files.filter(f => f.sensitivity !== 'Confidential' && f.sensitivity !== 'Internal').length}</span>
-              </div>
-            </div>
+        <div style="padding:14px 16px 6px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <div style="font-size:0.85rem;font-weight:700;letter-spacing:0.05em;color:var(--muted);text-transform:uppercase;">📊 Storage Health Dashboard</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button onclick="openVirusScanner()" style="background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:5px 14px;font-size:0.75rem;font-weight:600;cursor:pointer;">🛡️ Run Virus Scan</button>
+            <button onclick="showDuplicates()" style="background:rgba(201,166,107,0.12);color:var(--accent);border:1px solid rgba(201,166,107,0.25);border-radius:8px;padding:5px 14px;font-size:0.75rem;font-weight:600;cursor:pointer;">🪞 Find Duplicates</button>
           </div>
         </div>
-      `;
+        <div class="dashboard-grid">
+          <div class="dashboard-card" style="grid-column:span 2;">
+            <div class="dc-header"><div class="dc-title">Drive Health</div><div class="dc-icon">💾</div></div>
+            <div class="dc-list" style="margin-top:0;">${driveHTML}</div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dc-header"><div class="dc-title">Files Overview</div><div class="dc-icon">🗂️</div></div>
+            <div class="dc-value">${files.length}</div>
+            <div class="dc-label">${totalSizeGB.toFixed(2)} GB total · ${duplicates} duplicates</div>
+            <div class="dc-progress"><div class="dc-progress-bar" style="width:${Math.min(100, totalSizeGB * 5)}%;"></div></div>
+            <div class="dc-list">${Object.entries(typeMap).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([t, c]) => `<div class="dc-list-item"><span class="dc-list-label">${t.charAt(0).toUpperCase() + t.slice(1)}</span><span class="dc-list-value" style="color:${typeColors[t] || 'var(--text)'};">${c} files</span></div>`).join('')}</div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dc-header"><div class="dc-title">Security Status</div><div class="dc-icon">🛡️</div></div>
+            <div class="dc-value" style="color:${hasPII > 0 ? '#ef4444' : '#34d399'};">${hasPII > 0 ? '⚠️ ' + hasPII : '✅ Clean'}</div>
+            <div class="dc-label">${hasPII > 0 ? hasPII + ' files with PII' : 'No PII threats found'}</div>
+            <div class="dc-list">
+              <div class="dc-list-item"><span class="dc-list-label">🔒 Confidential</span><span class="dc-list-value" style="color:${confCount > 0 ? '#ef4444' : 'var(--muted)'};">${confCount}</span></div>
+              <div class="dc-list-item"><span class="dc-list-label">🛡️ Internal</span><span class="dc-list-value" style="color:${internalCount > 0 ? '#f59e0b' : 'var(--muted)'};">${internalCount}</span></div>
+              <div class="dc-list-item" style="cursor:pointer;" onclick="openVirusScanner()"><span class="dc-list-label">🦠 Virus scan</span><span class="dc-list-value" style="color:var(--accent);">Run now →</span></div>
+              ${files.filter(f => f.hasPII).slice(0, 2).map(f => `<div class="dc-list-item"><span class="dc-list-label">${f.icon} ${f.name}</span><span class="dc-list-value" style="color:#ef4444;">🔒</span></div>`).join('')}
+            </div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dc-header"><div class="dc-title">Space Savings</div><div class="dc-icon">💰</div></div>
+            <div class="dc-value">${spaceSavedGB.toFixed(2)} GB</div>
+            <div class="dc-label">AI dedup &amp; compression savings</div>
+            <div class="dc-progress"><div class="dc-progress-bar" style="width:${Math.min(100, (spaceSavedGB / 5) * 100)}%;"></div></div>
+            <div class="dc-list">
+              <div class="dc-list-item"><span class="dc-list-label">Duplicate space</span><span class="dc-list-value" style="color:#34d399;">${dupSizeMB.toFixed(1)} MB</span></div>
+              <div class="dc-list-item"><span class="dc-list-label">Compressible files</span><span class="dc-list-value" style="color:#34d399;">${compressedCount}</span></div>
+              <div class="dc-list-item"><span class="dc-list-label">Cloud savings/mo</span><span class="dc-list-value" style="color:#34d399;">$${(spaceSavedGB * 0.2 + 12).toFixed(0)}</span></div>
+            </div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dc-header"><div class="dc-title">Sensitivity Labels</div><div class="dc-icon">🏷️</div></div>
+            <div class="dc-list" style="margin-top:0;">
+              <div class="dc-list-item"><span class="dc-list-label">🔴 Confidential</span><span class="dc-list-value">${confCount}</span></div>
+              <div class="dc-list-item"><span class="dc-list-label">🟡 Internal</span><span class="dc-list-value">${internalCount}</span></div>
+              <div class="dc-list-item"><span class="dc-list-label">🟢 Public / Other</span><span class="dc-list-value">${files.filter(f => !f.sensitivity).length}</span></div>
+              <div class="dc-list-item"><span class="dc-list-label">🔐 PII exposed</span><span class="dc-list-value" style="color:${hasPII > 0 ? '#ef4444' : '#34d399'};">${hasPII}</span></div>
+              <div class="dc-list-item"><span class="dc-list-label">⭐ Starred files</span><span class="dc-list-value">${files.filter(f => f.starred).length}</span></div>
+            </div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dc-header"><div class="dc-title">AI Optimization Tips</div><div class="dc-icon">⚡</div></div>
+            <div class="dc-list" style="margin-top:0;">
+              ${duplicates > 0 ? `<div class="dc-list-item" style="cursor:pointer;" onclick="showDuplicates()"><span class="dc-list-label">🪞 Remove ${duplicates} duplicates</span><span class="dc-list-value" style="color:#34d399;">${dupSizeMB.toFixed(0)} MB freed</span></div>` : ''}
+              ${compressedCount > 0 ? `<div class="dc-list-item"><span class="dc-list-label">⚡ Convert ${compressedCount} images to WebP</span><span class="dc-list-value" style="color:#34d399;">~30% saved</span></div>` : ''}
+              ${hasPII > 0 ? `<div class="dc-list-item"><span class="dc-list-label">🔒 Secure ${hasPII} PII files</span><span class="dc-list-value" style="color:#ef4444;">⚠️ Urgent</span></div>` : ''}
+              <div class="dc-list-item" style="cursor:pointer;" onclick="openVirusScanner()"><span class="dc-list-label">🛡️ Full virus scan</span><span class="dc-list-value" style="color:var(--accent);">Run →</span></div>
+              ${files.length === 0 ? `<div class="dc-list-item"><span class="dc-list-label" style="color:var(--muted);">Browse a folder to see tips</span></div>` : ''}
+            </div>
+          </div>
+        </div>`;
 
-      document.getElementById('status-count').textContent = 'Dashboard View';
+      document.getElementById('status-count').textContent = 'Storage Health Dashboard';
     }
 
     // ══ CONVINCER DASHBOARD ══
@@ -3701,7 +3968,7 @@
       const dups = files.filter(f => f.tags.includes('dup')).length;
 
       area.innerHTML = `
-        <div class="empty-state" style="padding:40px; text-align:left; align-items:flex-start; max-width:800px; margin:0 auto;">
+      < div class="empty-state" style = "padding:40px; text-align:left; align-items:flex-start; max-width:800px; margin:0 auto;" >
           <div style="font-size:2rem; margin-bottom:20px;">🧠 The Convincer</div>
           <div style="font-size:1.1rem; line-height:1.6; color:var(--text); margin-bottom:30px;">
             NexaFiles isn't just a file manager; it's your personal data scientist. based on your ${totalFiles} files:
@@ -3732,7 +3999,7 @@
               <div style="color:var(--muted);">You spend an estimated <b>${(totalFiles * 0.5 / 60).toFixed(1)} hours/year</b> just searching for files. AI Search reduces this to near zero.</div>
             </div>
           </div>
-        </div>
+        </div >
       `;
       document.getElementById('status-count').textContent = 'Convincer View';
     }
@@ -3749,32 +4016,33 @@
       if (selected.size === 1) {
         const f = selectedFiles[0];
         addChatBubble(`
-        <div class="file-chip">
+      < div class="file-chip" >
           <span class="fc-icon">${f.icon}</span>
           <span class="fc-name">${f.name}</span>
           <span style="font-size:0.65rem;color:var(--muted);margin-left:4px;">${f.size}</span>
-        </div>
+        </div >
       `, 'ai-chip');
 
         setTimeout(() => {
-          addChatBubble(`Selected <b>${f.name}</b>. What would you like to do?`, 'ai');
+          addChatBubble(`Selected < b > ${f.name}</b >.What would you like to do? `, 'ai');
         }, 200);
 
       } else {
         addChatBubble(`
-        <div style="display:flex;flex-direction:column;gap:4px;">
-          ${selectedFiles.slice(0, 3).map(f => `
+      < div style = "display:flex;flex-direction:column;gap:4px;" >
+      ${selectedFiles.slice(0, 3).map(f => `
             <div class="file-chip">
               <span class="fc-icon">${f.icon}</span>
               <span class="fc-name">${f.name}</span>
             </div>
-          `).join('')}
+          `).join('')
+          }
           ${selected.size > 3 ? `<div style="font-size:0.75rem;color:var(--muted);margin-top:4px;">+${selected.size - 3} more</div>` : ''}
-        </div>
+        </div >
       `, 'ai-chip');
 
         setTimeout(() => {
-          addChatBubble(`${selected.size} files selected. Want me to summarize, organize, or find duplicates among them?`, 'ai');
+          addChatBubble(`${selected.size} files selected.Want me to summarize, organize, or find duplicates among them ? `, 'ai');
         }, 200);
       }
     }
@@ -3814,26 +4082,26 @@
         const bubble = document.createElement('div');
         bubble.className = 'chat-bubble ai';
         bubble.innerHTML = `
-        <div class="chat-avatar">✨</div>
+      < div class="chat-avatar" >✨</div >
         <div class="chat-content">${text}</div>
-      `;
+    `;
         messagesDiv.appendChild(bubble);
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
         return;
       }
 
       const bubble = document.createElement('div');
-      bubble.className = `chat-bubble ${type}`;
+      bubble.className = `chat - bubble ${type} `;
 
       const avatar = type === 'ai' ? '✨' : '👤';
       const time = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
       bubble.innerHTML = `
-      <div class="chat-avatar">${avatar}</div>
-      <div class="chat-content">
-        <div class="chat-text">${text}</div>
-        <div class="chat-time">${time}</div>
-      </div>
+      < div class="chat-avatar" > ${avatar}</div >
+        <div class="chat-content">
+          <div class="chat-text">${text}</div>
+          <div class="chat-time">${time}</div>
+        </div>
     `;
 
       messagesDiv.appendChild(bubble);
@@ -3846,16 +4114,16 @@
       indicator.className = 'chat-bubble ai';
       indicator.id = 'typing-indicator';
       indicator.innerHTML = `
-      <div class="chat-avatar">✨</div>
-      <div class="chat-content">
-        <div class="chat-text">
-          <div class="typing-indicator">
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
+      < div class="chat-avatar" >✨</div >
+        <div class="chat-content">
+          <div class="chat-text">
+            <div class="typing-indicator">
+              <div class="typing-dot"></div>
+              <div class="typing-dot"></div>
+              <div class="typing-dot"></div>
+            </div>
           </div>
         </div>
-      </div>
     `;
       messagesDiv.appendChild(indicator);
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -3873,7 +4141,7 @@
       if (lower.includes('duplicate') || lower.includes('dupes')) {
         const dupCount = files.filter(f => f.tags.includes('dup')).length;
         return {
-          text: `I found ${dupCount} duplicate files taking up ~18 MB. Would you like me to show them?`,
+          text: `I found ${dupCount} duplicate files taking up ~18 MB.Would you like me to show them ? `,
           action: () => showDuplicates()
         };
       }
@@ -3882,7 +4150,7 @@
       if (lower.includes('large') || lower.includes('big') || lower.includes('size')) {
         const largeFiles = files.filter(f => parseFloat(f.size) > 10).length;
         return {
-          text: `I found ${largeFiles} files larger than 10 MB. Sorting by size now...`,
+          text: `I found ${largeFiles} files larger than 10 MB.Sorting by size now...`,
           action: () => { sortMode = 2; document.getElementById('sort-label').textContent = 'Size'; renderFiles(); }
         };
       }
