@@ -1,0 +1,11 @@
+Place your icon files here:
+
+  icon.png   — 512×512 PNG  (used by Linux & as fallback)
+  icon.ico   — Windows ICO  (multi-size: 16,32,48,64,128,256)
+  icon.icns  — macOS ICNS
+
+Convert a PNG at:
+  https://cloudconvert.com/png-to-ico
+  https://cloudconvert.com/png-to-icns
+
+The app will still build without icons — Electron uses a default.
