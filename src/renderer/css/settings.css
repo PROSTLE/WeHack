@@ -283,3 +283,30 @@ select.set-input { cursor: pointer; }
 .set-check.warn { border-color: var(--caution); background: var(--caution-wash); }
 .set-check.warn strong { color: var(--caution-ink); }
 .set-check.warn span { color: var(--caution-ink); }
+
+/* The wake word's model download.
+   
+   A determinate bar rather than a spinner: this is forty megabytes over
+   whatever connection the user has, and "how much longer" is the only question
+   anyone has while it runs. The width is set from JavaScript on every progress
+   event, so the transition is kept short — long enough to look continuous
+   between updates, short enough that the bar is never lying about where it is. */
+.set-progress {
+  height: 6px;
+  margin-top: 10px;
+  border-radius: 999px;
+  background: var(--well);
+  overflow: hidden;
+}
+
+.set-progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 120ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-progress-bar { transition: none; }
+}

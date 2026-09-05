@@ -9,7 +9,7 @@
 //   - No API keys loaded from a file in the repository.
 
 const path = require('path');
-const { app, BrowserWindow, Menu, shell, session, nativeImage, dialog, nativeTheme } = require('electron');
+const { app, BrowserWindow, Menu, shell, session, nativeImage, dialog, nativeTheme, systemPreferences, protocol } = require('electron');
 
 const roots = require('./src/main/security/roots');
 const { AppState } = require('./src/main/app-state');
@@ -17,6 +17,13 @@ const { register } = require('./src/main/ipc');
 const { Agent, OVERLAY_INSTRUCTION } = require('./src/main/llm/agent');
 const agentTools = require('./src/main/llm/tools');
 const overlay = require('./src/main/overlay');
+const wakeModelStore = require('./src/main/wake/model-store');
+
+// Declared before the app is ready, because Chromium fixes its scheme table at
+// startup and a scheme registered later is simply not a scheme. This one serves
+// exactly one file — the wake word's cached acoustic model — to the recogniser
+// worker, which cannot read it over file://. See src/main/wake/model-store.js.
+wakeModelStore.registerScheme(protocol);
 
 let mainWindow = null;
 let state = null;
@@ -100,13 +107,29 @@ function createWindow() {
   // The overlay is one of ours as much as the main window is: it is the panel
   // the microphone button now mostly lives in, and refusing it would leave the
   // feature working only in the window the user was not looking at.
-  const isOwnWindow = (wc) =>
-    (!!mainWindow && !mainWindow.isDestroyed() && wc === mainWindow.webContents)
-    || overlay.isOverlayContents(wc);
+  // The listener window is one of ours too, and it is the one that most needs
+  // this: it exists solely to hold a microphone for the wake word. It is
+  // created only when that setting is on, so granting it here cannot open a
+  // microphone the user did not ask for.
+  const wakeWindowModule = require('./src/main/wake/window');
+  const isOwnWindow = (wc) => {
+    if (!!mainWindow && !mainWindow.isDestroyed() && wc === mainWindow.webContents) return true;
+    if (overlay.isOverlayContents(wc)) return true;
+    const listener = wakeWindowModule.get();
+    return !!listener && wc === listener.webContents;
+  };
 
-  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
+  session.defaultSession.setPermissionRequestHandler(async (wc, permission, callback, details) => {
     if (permission === 'media' && isOwnWindow(wc) && audioOnly(details)) {
-      callback(true);
+      // On macOS the permission must go through systemPreferences.askForMediaAccess
+      // so the OS raises the TCC dialog and adds the app to Privacy → Microphone.
+      // Calling callback(true) directly bypasses that gate entirely.
+      if (process.platform === 'darwin') {
+        const granted = await systemPreferences.askForMediaAccess('microphone');
+        callback(granted);
+      } else {
+        callback(true);
+      }
       return;
     }
     console.warn(`[security] denied permission request: ${permission}`);
@@ -239,6 +262,10 @@ app.whenReady().then(async () => {
     );
   }
 
+  // Serving the cached model has to be in place before any renderer asks for
+  // it, which the overlay does as soon as the wake word is switched on.
+  state.wakeModel.registerProtocol(protocol);
+
   createWindow();
   register(state, mainWindow);
 
@@ -247,10 +274,23 @@ app.whenReady().then(async () => {
   state.startSession(app);
 
   // The assistant is optional. Without a key everything else still works.
+  //
+  // Its tools carry the same progress hook the overlay's do. A question that
+  // sends the assistant through four hundred documents takes tens of seconds,
+  // and a panel showing an unchanging "Thinking…" for that long is a panel the
+  // user reasonably concludes has hung.
   state.agent = new Agent({
     gemini: state.gemini,
-    tools: agentTools.build(state, { app, nativeImage }),
     label: 'panel',
+    tools: agentTools.build(state, {
+      app,
+      nativeImage,
+      onStage: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('agent:stage', payload);
+        }
+      },
+    }),
   });
 
   // The overlay's agent. Same tools, same gate, its own conversation and its own
@@ -272,6 +312,14 @@ app.whenReady().then(async () => {
   });
 
   startOverlay();
+
+  // The wake word, if it is switched on and its model is here. This is the only
+  // place it is started, and it is started from the settings rather than from a
+  // flag held anywhere else — see applyWakeSetting in src/main/ipc/index.js.
+  await register.applyWakeSetting?.().then((r) => {
+    if (r?.armed) console.log('[nexafiles] listening for "Hey Nexa" — on this machine, nothing is sent anywhere.');
+    else if (r?.why === 'no model') console.log('[nexafiles] "Hey Nexa" is on but its speech model is not downloaded; enable it in Settings.');
+  }).catch((err) => console.warn('[wake]', err.message));
 
   const keyStatus = state.gemini.status();
   console.log(
@@ -298,6 +346,8 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   state?.close();
+  // The listener holds a microphone. It goes first, and unconditionally.
+  require('./src/main/wake/window').destroy();
   // A global shortcut outlives the window that registered it. Releasing it here
   // is what stops a killed instance from holding the key hostage for the next one.
   overlay.destroy();

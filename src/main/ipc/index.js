@@ -30,6 +30,7 @@ const machine = require('../system/machine');
 const { listProcesses, sampleCpuByProcess } = require('../system/processes');
 const sessionInfo = require('../system/session');
 const overlay = require('../overlay');
+const wakeWindow = require('../wake/window');
 
 /** Wraps a handler so a thrown error crosses IPC as a structured failure. */
 function handle(channel, fn) {
@@ -573,6 +574,12 @@ function register(state, mainWindow) {
       if ('model' in patch.assistant) state.gemini.setModel(after.assistant.model);
     }
 
+    // The dictation key is applied to the live client, so the next thing the
+    // user says uses the key they just pasted rather than the one from launch.
+    if (patch && patch.dictation && 'groqKey' in patch.dictation) {
+      state.groq.setKey(after.dictation.groqKey || process.env.GROQ_API_KEY || '');
+    }
+
     // The overlay's key is claimed from the operating system, so a change has to
     // be applied now rather than at the next launch — and whether the claim
     // succeeded is part of the answer, because another application may already
@@ -586,6 +593,15 @@ function register(state, mainWindow) {
         overlay.destroy();
         overlayHotkey = { ok: false, hotkey: after.overlay.hotkey, why: 'The overlay is switched off.' };
       }
+    }
+
+    // The wake word is re-evaluated from scratch rather than patched: whether
+    // it should be listening depends on three settings and on whether the model
+    // is downloaded, and working that out in one place is what stops a hidden
+    // window holding a microphone open after the setting that justified it was
+    // switched off.
+    if (patch && (patch.overlay || patch.dictation)) {
+      applyWakeSetting().catch((err) => console.warn('[wake]', err.message));
     }
 
     // Both windows are told. The overlay reads three of these — whether it is
@@ -696,35 +712,70 @@ function register(state, mainWindow) {
   });
 
   // ── duplicates ───────────────────────────────────────────────────────────
-  handle('duplicates:find', async (tier) => {
+  /**
+   * Duplicate detection, optionally confined to one folder.
+   *
+   * The scope is a subtree of the scan, not a new scan: comparing files means
+   * comparing what was measured, so a folder outside the scan has nothing to
+   * compare and is refused rather than silently returning nothing. It is checked
+   * against the approved roots as well, because the renderer names the path.
+   */
+  handle('duplicates:find', async (tier, { under = null } = {}) => {
     const scan = state.currentScan();
     if (!scan) throw new Error('No scan has run yet. Scan a folder first.');
+
+    let scope = null;
+    if (under) {
+      scope = roots.assertInsideRoot(under, { mustExist: true });
+      const root = roots.normalize(scan.root);
+      const target = roots.normalize(scope);
+      if (target !== root && !target.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) {
+        throw new Error(
+          `${path.basename(scope)} is outside the folder that was scanned ` +
+          `(${scan.root}). Scan it first, or choose a folder inside that one.`);
+      }
+      // The whole scan and the scan root are the same search; treating them as
+      // one keeps the cached results and the UI label agreeing.
+      if (target === root) scope = null;
+    }
+
     const onProgress = (p) => send('scan:progress', { ...p, scanId: scan.id });
+    const opts = { onProgress, under: scope };
 
     let out;
     if (tier === 'image') {
-      out = await duplicates.findSimilarImages(state.index, scan.id, nativeImage, { onProgress });
-      state.lastDuplicates.image = out;
+      out = await duplicates.findSimilarImages(state.index, scan.id, nativeImage, opts);
     } else if (tier === 'text') {
       // Documents go through real format parsing now, not a raw byte read.
       out = await contentDupes.findSimilarDocuments(
         state.index, scan.id,
         { simHash: duplicates.simHash, hamming64: duplicates.hamming64 },
-        { onProgress });
-      state.lastDuplicates.text = out;
+        opts);
     } else if (tier === 'video') {
-      out = await contentDupes.findVideoDuplicates(state.index, scan.id, { onProgress });
-      state.lastDuplicates.video = out;
+      out = await contentDupes.findVideoDuplicates(state.index, scan.id, opts);
     } else {
-      out = await duplicates.findExactDuplicates(state.index, scan.id, { onProgress });
-      state.lastDuplicates.exact = out;
+      out = await duplicates.findExactDuplicates(state.index, scan.id, opts);
     }
+
+    // A scoped result is not the whole-scan result and must not be cached as it.
+    // The assistant's find_duplicates tool reads this cache, and handing it a
+    // subtree's findings as though they covered the scan would have it reporting
+    // a reclaimable total for the disk that was only ever measured for one
+    // folder — exactly the kind of unearned number this application refuses.
+    const key = tier === 'image' ? 'image' : tier === 'text' ? 'text'
+      : tier === 'video' ? 'video' : 'exact';
+    state.lastDuplicates[key] = scope ? null : out;
 
     state.index.clearDuplicates(scan.id, tierName(tier));
     for (const g of out.groups) state.index.saveDuplicateGroup(scan.id, g);
 
     return {
       tier: tierName(tier),
+      // What was actually searched, so the panel can say so rather than letting
+      // "12 groups" be read as a statement about the whole disk.
+      scope: scope || null,
+      scopeName: scope ? path.basename(scope) : null,
+      searchedRoot: scope || scan.root,
       groups: out.groups,
       stats: out.stats,
       totalWasted: out.groups.reduce((n, g) => n + g.wastedBytes, 0),
@@ -923,6 +974,11 @@ function register(state, mainWindow) {
   handle('agent:status', async () => ({
     ...state.gemini.status(),
     keySource: state.keySource,
+    // How many exchanges are being carried, and whether a question is running.
+    // Both are things the panel can say out loud rather than leaving the user to
+    // infer from how long it is taking.
+    historyDepth: state.agent?.historyDepth() ?? 0,
+    busy: !!state.panelRequest,
     // The agent is a fixed set of tools; naming them is more use to someone
     // deciding whether to trust it than any description of the model would be.
     tools: require('../llm/agent').toolDeclarations()[0].functionDeclarations
@@ -934,7 +990,29 @@ function register(state, mainWindow) {
 
   /** Sends one real request, so "working" means it worked. */
   handle('agent:test', async () => state.gemini.probe());
-  handle('agent:reset', async () => { state.agent?.reset(); return true; });
+  handle('agent:reset', async () => {
+    // A question still in flight belongs to the conversation being discarded, so
+    // it goes with it rather than delivering its answer into an empty panel.
+    state.panelRequest?.abort();
+    state.agent?.reset();
+    state.panelChoices.clear();
+    return true;
+  });
+
+  /**
+   * Stop.
+   *
+   * Abandons the turn in flight. Nothing here can leave anything half-done —
+   * every tool the assistant has either reads or produces a proposal, and a
+   * proposal that is abandoned is simply never shown. The turn is dropped from
+   * the conversation entirely, so the next question is asked against the last
+   * exchange that actually finished.
+   */
+  handle('agent:cancel', async () => {
+    if (!state.panelRequest) return false;
+    state.panelRequest.abort();
+    return true;
+  });
   /**
    * Describes a file dropped on the assistant, before anything is sent.
    *
@@ -975,17 +1053,164 @@ function register(state, mainWindow) {
    * box, so a microphone left open cannot ask the agent anything.
    */
   handle('agent:transcribe', async (audio) => {
-    if (!state.gemini?.available) {
-      const err = new Error('No API key is configured, so speech cannot be transcribed.');
+    // Either engine is enough. Requiring a Gemini key here — which is what this
+    // used to do — would refuse to transcribe for a user who had set up Groq and
+    // nothing else, which is now the recommended way to set it up.
+    if (!state.groq?.available && !state.gemini?.available) {
+      const err = new Error(
+        'No transcription engine is configured. Add a Groq key in Settings for ' +
+        'fast, accurate dictation, or a Gemini key to use the assistant model.'
+      );
       err.code = 'NO_KEY';
       throw err;
     }
-    return voice.transcribe(state.gemini, audio || {});
+    return voice.transcribe({
+      gemini: state.gemini,
+      groq: state.groq,
+      engine: state.settings.values.dictation.engine,
+    }, audio || {});
   });
 
-  handle('agent:send', async (message, attachmentPaths) => {
-    if (!state.agent) throw new Error('The assistant is not available.');
+  /** What dictation would use right now, and why. */
+  handle('voice:status', async () => {
+    const groq = state.groq.status();
+    const gemini = state.gemini.status();
+    const engine = state.settings.values.dictation.engine === 'groq' && groq.configured
+      ? 'groq'
+      : (gemini.configured ? 'gemini' : null);
+    return {
+      engine,
+      preferred: state.settings.values.dictation.engine,
+      groq: { configured: groq.configured, model: groq.model, keyHint: groq.keyHint, cooldownMs: groq.cooldownMs },
+      gemini: { configured: !!gemini.configured, model: gemini.model },
+    };
+  });
 
+  // ── the wake word's acoustic model ───────────────────────────────────────
+  //
+  // Forty megabytes, fetched once, when the user actually switches "Hey Nexa"
+  // on. Progress is streamed to whichever window asked, because a silent
+  // forty-megabyte download is indistinguishable from a feature that is broken.
+
+  handle('wake:modelStatus', async () => state.wakeModel.status());
+
+  /** The listener window reporting that its handlers are bound. */
+  handle('wake:hostReady', async () => wakeWindow.markHostReady());
+
+  /**
+   * Brings the wake word into line with the settings.
+   *
+   * Called at startup and after every settings change, and deliberately the
+   * only place that decides whether to listen. Three things all have to be true
+   * — the overlay is on, the wake word is on, and the model is downloaded — and
+   * a listener is created only when all three hold. Anything else disarms,
+   * which destroys the window and with it the microphone.
+   */
+  async function applyWakeSetting() {
+    const prefs = state.settings.values.overlay || {};
+    const model = await state.wakeModel.status();
+    const wanted = !!prefs.enabled && !!prefs.wakeWord && model.ready;
+    if (!wanted) {
+      wakeWindow.disarm();
+      return { armed: false, why: !prefs.wakeWord ? 'off' : (!model.ready ? 'no model' : 'overlay off') };
+    }
+    wakeWindow.arm(model.url);
+    return { armed: true, why: null };
+  }
+  register.applyWakeSetting = applyWakeSetting;
+
+  handle('wake:ensureModel', async () => {
+    let lastSent = 0;
+    const done = (result) => {
+      // A model that has just arrived should take effect now, not at the next
+      // launch — the user ticked the box before the download finished.
+      applyWakeSetting().catch(() => {});
+      return result;
+    };
+    return state.wakeModel.ensure((progress) => {
+      // Throttled: the stream produces thousands of chunks and a progress bar
+      // needs a few dozen updates a second at most.
+      const now = Date.now();
+      if (now - lastSent < 100 && progress.ratio < 1) return;
+      lastSent = now;
+      send('wake:modelProgress', progress);
+      const overlayWindow = overlay.get();
+      if (overlayWindow) overlayWindow.webContents.send('wake:modelProgress', progress);
+    }).then(done);
+  });
+
+  handle('wake:cancelModel', async () => state.wakeModel.cancel());
+
+  handle('wake:removeModel', async () => {
+    // Disarmed first: removing the file under a running recogniser would leave
+    // a listener holding a microphone for a model that is no longer there.
+    wakeWindow.disarm();
+    return state.wakeModel.remove();
+  });
+
+  /**
+   * One turn of the side panel's conversation.
+   *
+   * Shared by a typed question and by the answer to a "which of these did you
+   * mean" list, because from the assistant's side those are the same thing: a
+   * message from the user, answered against the same history.
+   *
+   * Three things happen here that did not before. Progress is pushed to the
+   * window while the turn runs, so a question that reads four hundred documents
+   * says what it is doing instead of showing an unchanging "Thinking…" for half a
+   * minute. The turn is cancellable. And a question the assistant asks back —
+   * ask_user_to_choose — is kept here by id, so that when the answer arrives the
+   * paths it names can be checked against the ones actually offered rather than
+   * taken on the renderer's word. That last one is why the panel could not
+   * previously ask anything back: the tool's output was dropped on the floor and
+   * the user saw a question with no list under it.
+   */
+  const askPanel = async (message, { attachmentParts = [], attachmentNotes = [] } = {}) => {
+    if (!state.agent) throw new Error('The assistant is not available.');
+    if (state.panelRequest) {
+      throw new Error('The assistant is already working on a question. Stop it first.');
+    }
+
+    const controller = new AbortController();
+    state.panelRequest = controller;
+    let out;
+    try {
+      out = await state.agent.send(String(message || '').slice(0, 8000), {
+        attachmentParts,
+        signal: controller.signal,
+        onStage: (payload) => send('agent:stage', payload),
+      });
+    } finally {
+      // Cleared however the turn ended, including by throwing. Left set, it would
+      // refuse every later question with "already working".
+      state.panelRequest = null;
+    }
+
+    if (out.plan) state.registerPlan(out.plan);
+    if (out.conversion) state.conversions.set(out.conversion.id, out.conversion);
+    if (out.choice) {
+      state.panelChoices.set(out.choice.id, out.choice);
+      // Bounded, because the panel keeps its transcript on screen and an old list
+      // stays clickable. A handful is enough to answer a question scrolled back
+      // to; beyond that the oldest goes.
+      while (state.panelChoices.size > 10) {
+        state.panelChoices.delete(state.panelChoices.keys().next().value);
+      }
+    }
+
+    return {
+      reply: out.reply,
+      plan: out.plan ? out.plan.toJSON() : null,
+      conversion: out.conversion || null,
+      choice: out.choice || null,
+      toolCalls: out.toolCalls,
+      error: out.error,
+      cancelled: !!out.cancelled,
+      attachments: attachmentNotes,
+    };
+  };
+
+  handle('agent:send', async (message, attachmentPaths) => {
     // Attachments are read here, in the main process, and reach the model as
     // extracted text or pixels. Six at a time: past that the request stops
     // being a question about some files and starts being a bulk upload.
@@ -1001,21 +1226,52 @@ function register(state, mainWindow) {
         attachmentNotes.push({ path: p, ok: false, note: err.message });
       }
     }
+    return askPanel(message, { attachmentParts, attachmentNotes });
+  });
 
-    const out = await state.agent.send(
-      String(message || '').slice(0, 8000),
-      { attachmentParts }
-    );
-    if (out.plan) state.registerPlan(out.plan);
-    if (out.conversion) state.conversions.set(out.conversion.id, out.conversion);
-    return {
-      reply: out.reply,
-      plan: out.plan ? out.plan.toJSON() : null,
-      conversion: out.conversion || null,
-      toolCalls: out.toolCalls,
-      error: out.error,
-      attachments: attachmentNotes,
-    };
+  /**
+   * The user's answer to "which of these did you mean", in the side panel.
+   *
+   * The renderer sends back the paths of the rows it drew; each is checked
+   * against the options that were actually offered for that question. A path
+   * nobody was shown is a file the user never chose, and it is dropped rather
+   * than searched for.
+   */
+  handle('agent:choose', async (choiceId, paths) => {
+    const choice = state.panelChoices.get(String(choiceId || ''));
+    if (!choice) throw new Error('That question is no longer open.');
+
+    const offered = new Map(choice.options.map((o) => [roots.normalize(o.path), o]));
+    const picked = [];
+    for (const p of (paths || []).slice(0, 12)) {
+      const match = offered.get(roots.normalize(String(p || '')));
+      if (match) picked.push(match);
+    }
+    if (picked.length === 0) throw new Error('None of those files were among the ones offered.');
+
+    // Answered once. A list that could be redeemed twice is a choice the user
+    // made once and authorised forever — so it is spent before the turn runs,
+    // not after, which is the only ordering a second click cannot slip past.
+    state.panelChoices.delete(choice.id);
+
+    // Phrased as the user answering, because that is what happened: the model
+    // sees an ordinary turn of conversation naming paths it already knows.
+    const answer = picked.length === 1
+      ? `I mean this one: ${picked[0].path}`
+      : `I mean these: ${picked.map((p) => p.path).join(', ')}`;
+
+    let out;
+    try {
+      out = await askPanel(answer);
+    } catch (err) {
+      // The turn never ran, so the choice was not in fact spent. Put it back:
+      // otherwise a question that failed for a passing reason — the assistant
+      // busy, the network down — costs the user the list as well as the answer,
+      // and the only way back to it is to ask the whole thing again.
+      state.panelChoices.set(choice.id, choice);
+      throw err;
+    }
+    return { ...out, picked: picked.map((p) => ({ path: p.path, name: p.name })) };
   });
 
   // ── the overlay panel ────────────────────────────────────────────────────
@@ -1030,10 +1286,16 @@ function register(state, mainWindow) {
   handle('overlay:status', async () => {
     const g = state.gemini.status();
     const caps = await converter.capabilities();
+    const wake = await state.wakeModel.status();
     return {
       assistantConfigured: !!g.configured,
       model: g.model,
       hotkey: overlay.currentHotkey(),
+      // The overlay cannot start the recogniser without this, and asking for it
+      // separately would be a second round-trip on a path that is being made
+      // fast on purpose.
+      wake: { ready: wake.ready, url: wake.url, bytes: wake.bytes },
+      dictationConfigured: !!(state.groq?.available || g.configured),
       conversion: {
         available: caps.available,
         selfRendered: caps.selfRendered || [],
@@ -1075,8 +1337,18 @@ function register(state, mainWindow) {
   });
 
   handle('overlay:reset', async () => {
+    // Aborted before the history is cleared, not after: a turn still running
+    // would otherwise write into the conversation that was just emptied.
+    state.overlayRequest?.abort();
     state.overlayAgent?.reset();
     state.overlayChoices.clear();
+    return true;
+  });
+
+  /** Stop, for the overlay. Dismissing the panel is one of the ways to press it. */
+  handle('overlay:cancel', async () => {
+    if (!state.overlayRequest) return false;
+    state.overlayRequest.abort();
     return true;
   });
 
@@ -1090,12 +1362,29 @@ function register(state, mainWindow) {
    */
   const askOverlay = async (message) => {
     if (!state.overlayAgent) throw new Error('The assistant is not available.');
-    const out = await state.overlayAgent.send(String(message || '').slice(0, 4000), {
-      onStage: (payload) => {
-        const win = overlay.get();
-        if (win) win.webContents.send('overlay:stage', payload);
-      },
-    });
+
+    // A turn the user walked away from has to actually stop. Without this, the
+    // panel dismissed mid-question kept working, and its answer arrived into a
+    // conversation that had since been reset — pushing a model turn into an empty
+    // history, where its function calls have nothing to answer them. The next
+    // question asked of the overlay was then rejected outright.
+    state.overlayRequest?.abort();
+    const controller = new AbortController();
+    state.overlayRequest = controller;
+
+    let out;
+    try {
+      out = await state.overlayAgent.send(String(message || '').slice(0, 4000), {
+        signal: controller.signal,
+        onStage: (payload) => {
+          const win = overlay.get();
+          if (win) win.webContents.send('overlay:stage', payload);
+        },
+      });
+    } finally {
+      // Only if it is still ours: a later question may already have replaced it.
+      if (state.overlayRequest === controller) state.overlayRequest = null;
+    }
 
     if (out.plan) state.registerPlan(out.plan);
     if (out.conversion) state.conversions.set(out.conversion.id, out.conversion);

@@ -212,32 +212,54 @@ app.whenReady().then(() => {
 
       // ---- the wake word ----
       //
-      // The listening itself needs a microphone and a voice, so what is tested
-      // here is everything around it: that the module loads in the renderer,
-      // that it is off unless asked for, and that the phrase matcher accepts
-      // what a transcription service actually returns for "Hey Nexa" and
-      // refuses what it must not act on.
+      // Recognition happens on this machine now, so what used to be tested here
+      // — that only short, wake-phrase-shaped audio was ever uploaded — no
+      // longer describes anything: nothing is uploaded at all. What is tested
+      // instead is the property that replaced it. That the module loads, that it
+      // is off unless asked for, that it cannot start without a local model, and
+      // that the matcher accepts what the recogniser actually returns for "Hey
+      // Nexa" while refusing what it must not act on.
       const wake = await js(`(async () => {
         const w = await import('./js/wake.js');
-        const said = (t) => w.WAKE_PATTERN.test(t);
+        const said = (t) => w.matchesWake(t);
+        // Refused for one of two reasons depending on where it is called: in
+        // this window there is no recogniser at all, and everywhere there is no
+        // model URL. Both are correct; the property under test is that it will
+        // not quietly open a microphone it cannot use.
+        let refusedWithoutModel = false;
+        try {
+          await w.start({ onWake() {} });        // no modelUrl
+        } catch (err) {
+          refusedWithoutModel = /model|wake word|recognis/i.test(err.message);
+        }
         return {
           loaded: typeof w.start === 'function' && typeof w.stop === 'function',
           listeningByDefault: w.isListening(),
+          stillNotListening: w.isListening(),
+          refusedWithoutModel,
+          // The panel must NOT carry the recogniser: it lives in the listener
+          // window, whose policy allows the eval the recogniser needs and whose
+          // document renders nothing. Finding it here would mean that
+          // permission had leaked back into the window that draws file names.
+          recogniserAbsentFromPanel: typeof window.Vosk === 'undefined',
           accepts: ['Hey Nexa', 'hey nexa', 'Hey, Nexa!', 'Hey Nexus', 'hey next',
-                    'Hey Nexa, find my blog'].map(said),
+                    'hey next a', 'Hey Nexa, find my blog'].map(said),
           refuses: ['nexa', 'I was talking about Nexa yesterday',
-                    'they said hello', 'next week'].map(said),
-          bounds: [w.MIN_UTTERANCE_MS, w.MAX_UTTERANCE_MS],
+                    'they said hello', 'next week', 'go to the next file',
+                    'my nexus phone'].map(said),
         };
       })()`);
       ok('the wake listener loads in the panel', wake.loaded);
       ok('and is not listening unless it was asked to', wake.listeningByDefault === false);
-      ok('it accepts what a transcript of “Hey Nexa” actually looks like',
+      ok('the recogniser does not run in the panel, which renders file names',
+        wake.recogniserAbsentFromPanel);
+      ok('it refuses to start without a recogniser and a local speech model',
+        wake.refusedWithoutModel);
+      ok('and a refused start leaves the microphone closed', wake.stillNotListening === false);
+      ok('it accepts what the recogniser actually returns for “Hey Nexa”',
         wake.accepts.every(Boolean), JSON.stringify(wake.accepts));
       ok('it refuses the word on its own, and the word in a sentence',
         wake.refuses.every((r) => r === false), JSON.stringify(wake.refuses));
-      ok('only utterance-length audio is ever checked',
-        wake.bounds[0] >= 300 && wake.bounds[1] <= 3000, wake.bounds.join('..'));
 
       const settings = await js(`window.nexa.settings.get()`);
       ok('the wake word is off until switched on', settings.overlay.wakeWord === false);

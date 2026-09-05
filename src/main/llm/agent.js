@@ -97,6 +97,48 @@ and these are added on top:
   prose only pushes the answer off the edge of a small window.
 `.trim();
 
+/**
+ * How many of the user's own questions, with everything that followed each,
+ * are resent on the next request.
+ *
+ * The history was previously unbounded, which is fine for the first few
+ * questions and then quietly stops being fine: every tool result ever returned —
+ * forty file listings, a hundred search snippets — is resent verbatim on every
+ * subsequent turn, so a long session gets slower, more expensive, and eventually
+ * exceeds the model's input limit and fails outright. Eight exchanges is more
+ * context than any question here has been observed to need.
+ */
+const HISTORY_TURNS = 8;
+
+/**
+ * Whether a history entry is the user actually speaking.
+ *
+ * Tool results are also pushed with `role: "user"` — that is the shape the API
+ * requires — so the role alone does not distinguish the two. A turn that carries
+ * any part that is not a functionResponse is a person typing.
+ */
+function isUserQuestion(entry) {
+  return entry.role === 'user' && (entry.parts || []).some((p) => !p.functionResponse);
+}
+
+/**
+ * Drops the oldest exchanges, cutting only where a cut is safe.
+ *
+ * The one rule: a model turn containing function calls and the turn carrying
+ * their responses must never be separated. The API rejects a conversation where
+ * a call has no matching response, so trimming to a fixed number of entries
+ * would break the assistant at random. Cutting only at the start of a user
+ * question always leaves complete exchanges behind.
+ */
+function trimHistory(history, turns = HISTORY_TURNS) {
+  const starts = [];
+  for (let i = 0; i < history.length; i++) {
+    if (isUserQuestion(history[i])) starts.push(i);
+  }
+  if (starts.length <= turns) return history;
+  return history.slice(starts[starts.length - turns]);
+}
+
 /** Declarations sent to the model. Read tools first, then plan tools. */
 function toolDeclarations() {
   return [{
@@ -336,11 +378,25 @@ class Agent {
 
   reset() { this.history = []; }
 
+  /** How many exchanges are currently being resent. For diagnostics only. */
+  historyDepth() {
+    return this.history.filter(isUserQuestion).length;
+  }
+
   /**
    * One turn of conversation.
    * @returns {{reply: string, plan: object|null, toolCalls: Array, error: string|null}}
    */
-  async send(userMessage, { maxRounds = 6, attachmentParts = [], onStage = null } = {}) {
+  /**
+   * @param {string} userMessage
+   * @param {object} [opts]
+   * @param {AbortSignal} [opts.signal] the user pressing Stop. A cancelled turn is
+   *   removed from the history in full rather than left half-finished, so the next
+   *   question starts from the last exchange that actually completed.
+   */
+  async send(userMessage, {
+    maxRounds = 10, attachmentParts = [], onStage = null, signal = null,
+  } = {}) {
     const stage = (name, detail = {}) => {
       try { onStage?.({ stage: name, ...detail }); } catch { /* the UI is optional */ }
     };
@@ -350,16 +406,26 @@ class Agent {
         reply: 'No Gemini API key is configured, so the assistant is unavailable. ' +
                'Everything else in NexaFiles works without it: scanning, duplicate ' +
                'detection, leftovers and quarantine all run locally.',
-        plan: null, toolCalls: [], error: 'NO_KEY',
+        plan: null, conversion: null, choice: null, toolCalls: [], error: 'NO_KEY',
       };
     }
 
     // Attachments precede the question they are about, which is the order the
     // model reads them in and the order the user sent them.
-    this.history.push({
-      role: 'user',
-      parts: [...attachmentParts, { text: userMessage }],
-    });
+    this.history.push({ role: 'user', parts: [...attachmentParts, { text: userMessage }] });
+
+    // Trimmed with the new question already in it, so that HISTORY_TURNS bounds
+    // what is actually sent rather than what was there beforehand — trimming
+    // first and then pushing sends one exchange more than the stated limit.
+    this.history = trimHistory(this.history);
+
+    // Where this turn starts, so that a cancelled or failed one can be removed
+    // whole. Half a turn left behind — a model turn whose function calls were
+    // never answered — is not merely untidy: the API rejects the entire
+    // conversation on the next request, so one Stop would break the assistant
+    // until it was reset.
+    const turnStart = this.history.length - 1;
+    const abandonTurn = () => { this.history.length = turnStart; };
 
     const toolCalls = [];
     let producedPlan = null;
@@ -367,14 +433,38 @@ class Agent {
     let producedChoice = null;
 
     for (let round = 0; round < maxRounds; round++) {
+      if (signal?.aborted) {
+        abandonTurn();
+        return {
+          reply: 'Stopped. Nothing was changed.',
+          plan: null, conversion: null, choice: null, toolCalls,
+          error: 'CANCELLED', cancelled: true,
+        };
+      }
+
       let resp;
       try {
         stage(round === 0 ? 'thinking' : 'working');
         resp = await this.gemini.generate(this.history, {
           systemInstruction: this.systemInstruction,
           tools: toolDeclarations(),
+          signal,
         });
       } catch (err) {
+        // A cancelled turn is not a failure and is not reported as one. The whole
+        // exchange goes, so the next question is asked against a clean history.
+        if (err.code === 'CANCELLED') {
+          abandonTurn();
+          return {
+            reply: 'Stopped. Nothing was changed.',
+            plan: null, conversion: null, choice: null, toolCalls,
+            error: 'CANCELLED', cancelled: true,
+          };
+        }
+        // Anything else ends the turn too, and the turn is removed with it: a
+        // question the model never answered should not sit in the history shaping
+        // the answer to the next one.
+        abandonTurn();
         // Do not fabricate an answer when the model was never reached.
         return {
           reply: err.code === 'ALL_KEYS_EXHAUSTED'
@@ -430,6 +520,17 @@ class Agent {
 
       const responses = [];
       for (const call of calls) {
+        // Checked per call rather than per round: one turn can ask for a content
+        // search over hundreds of documents, and Stop should not have to wait for
+        // the whole batch before it takes effect.
+        if (signal?.aborted) {
+          abandonTurn();
+          return {
+            reply: 'Stopped. Nothing was changed.',
+            plan: null, conversion: null, choice: null, toolCalls,
+            error: 'CANCELLED', cancelled: true,
+          };
+        }
         stage('tool', { tool: call.name, args: call.args || {} });
         const impl = this.tools[call.name];
         let result;
@@ -477,4 +578,7 @@ class Agent {
   }
 }
 
-module.exports = { Agent, SYSTEM_INSTRUCTION, OVERLAY_INSTRUCTION, toolDeclarations };
+module.exports = {
+  Agent, SYSTEM_INSTRUCTION, OVERLAY_INSTRUCTION, toolDeclarations,
+  trimHistory, isUserQuestion, HISTORY_TURNS,
+};

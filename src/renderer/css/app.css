@@ -579,6 +579,41 @@ button.btn.small { padding: 4px 9px; font-size: 12px; }
 .aside-body { flex: 1; overflow-y: auto; padding: 16px; }
 .aside-foot { border-top: 1px solid var(--line); padding: 12px; }
 
+/* ── where the duplicate search will look ─────────────────────────────────
+   Comparing files means comparing what the scan measured, so this narrows the
+   search inside the scan rather than starting a new one. It states the scope
+   even when the scope is "everything", because a count with no scope attached
+   gets read as a statement about the whole disk. */
+.dupe-scope {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  background: var(--well);
+}
+.dupe-scope-label { font-size: 12px; color: var(--ink-3); flex: none; }
+.dupe-scope-value {
+  display: inline-flex; align-items: center; gap: 6px;
+  /* Takes the slack so the buttons keep their size, and is the thing that
+     truncates when there is not enough width for everything. */
+  flex: 1 1 120px; min-width: 0;
+  font-family: var(--mono); font-size: 12px; color: var(--ink-2);
+  overflow: hidden; white-space: nowrap;
+}
+.dupe-scope-value > :last-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.dupe-scope-actions { display: flex; gap: 8px; flex: none; }
+.dupe-scope-value .icon { flex: none; color: var(--ink-3); }
+/* A narrowed search is marked, so it is never mistaken for a whole-disk result. */
+.dupe-scope-value.narrowed { color: var(--primary); font-weight: 600; }
+.dupe-scope-value.narrowed .icon { color: var(--primary); }
+/* Below this width the label, the path and two buttons cannot share a row
+   without the path becoming useless, so the buttons drop to their own. */
+@media (max-width: 620px) {
+  .dupe-scope { align-items: stretch; }
+  .dupe-scope-value { flex-basis: 100%; }
+}
+
 .chat-msg { margin-bottom: 14px; }
 .chat-msg .who { font-size: 11px; font-weight: 600; color: var(--ink-3); margin-bottom: 3px; }
 .chat-msg .body { white-space: pre-wrap; }
@@ -589,6 +624,115 @@ button.btn.small { padding: 4px 9px; font-size: 12px; }
   font-family: var(--mono); font-size: 11px; color: var(--ink-3);
   margin-top: 5px;
 }
+/* ── the assistant is working ─────────────────────────────────────────────
+   A question that reads four hundred documents takes tens of seconds. The line
+   below says which of them it is on, so the wait is legible rather than
+   indistinguishable from a hang. */
+.chat-working { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.chat-stage { color: var(--ink-3); font-size: 13px; }
+.chat-dots { display: inline-flex; gap: 3px; flex: none; }
+.chat-dots i {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--ink-3); animation: chat-dot 1.1s ease-in-out infinite;
+}
+.chat-dots i:nth-child(2) { animation-delay: .16s; }
+.chat-dots i:nth-child(3) { animation-delay: .32s; }
+@keyframes chat-dot {
+  0%, 70%, 100% { opacity: .25; }
+  35%           { opacity: 1; }
+}
+/* Someone who has switched motion off gets a steady row of dots rather than
+   nothing at all: the mark that something is running still has to be there. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-dots i { animation: none; opacity: .55; }
+}
+
+/* ── "which of these did you mean" ────────────────────────────────────────
+   The assistant asking back, rather than choosing one of the user's documents
+   on their behalf. Each row carries the passage that put the file on the list,
+   because what identifies a document is what it says. */
+.chat-choice { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+.choice-q { margin: 0 0 2px; font-size: 13px; color: var(--ink-2); }
+.choice-file {
+  display: flex; gap: 9px; align-items: flex-start; width: 100%;
+  text-align: left; font: inherit; cursor: pointer;
+  padding: 8px 9px;
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  background: var(--panel); color: var(--ink);
+}
+.choice-file:hover:not(:disabled) { border-color: var(--primary); background: var(--primary-wash); }
+.choice-file:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.choice-file:disabled { cursor: default; opacity: .6; }
+.choice-file[aria-current="true"] {
+  opacity: 1; border-color: var(--primary); background: var(--primary-wash);
+}
+.choice-mark {
+  flex: none; min-width: 30px; padding: 2px 4px; text-align: center;
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  color: var(--ink-2); background: var(--well); border-radius: 3px;
+}
+.choice-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.choice-name { font-weight: 600; font-size: 13px; word-break: break-word; }
+.choice-meta {
+  font-size: 11px; color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.choice-snip {
+  font-size: 11px; color: var(--ink-2); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.choice-snip mark {
+  background: var(--primary-wash); color: var(--ink);
+  padding: 0 1px; border-radius: 2px;
+}
+
+/* ── a proposal, and what it produced ─────────────────────────────────────
+   Converting writes a file the user did not have, so every destination is on
+   screen before anything is written. */
+.chat-proposal {
+  margin-top: 8px; padding: 9px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  background: var(--panel);
+}
+.chat-proposal.spent { opacity: .65; }
+.proposal-row {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12px; padding: 2px 0; min-width: 0;
+}
+.proposal-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.proposal-name.to { color: var(--ink-2); font-family: var(--mono); font-size: 11px; }
+.proposal-arrow { color: var(--ink-3); flex: none; }
+.proposal-meta { color: var(--ink-3); font-size: 11px; margin-left: auto; flex: none; }
+.proposal-tag {
+  flex: none; padding: 1px 5px; border-radius: 3px;
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  background: var(--caution-wash); color: var(--caution-ink);
+}
+.proposal-tag.new { background: var(--primary-wash); color: var(--primary); }
+.proposal-row.failed { color: var(--caution); }
+.proposal-row.failed .icon { flex: none; }
+.proposal-note { margin: 7px 0 0; font-size: 11px; color: var(--ink-3); line-height: 1.5; }
+.proposal-actions { display: flex; gap: 8px; margin-top: 9px; }
+.proposal-link {
+  border: none; background: none; padding: 0 2px; flex: none;
+  font: inherit; font-size: 11px; color: var(--primary);
+  cursor: pointer; text-decoration: underline;
+}
+.proposal-link:hover { color: var(--primary-hover); }
+
+/* Clearing the conversation is deliberately quiet: it is not destructive — no
+   file is touched — but it does throw away what the assistant remembers. */
+.chat-clear {
+  width: 100%; margin-top: 8px; padding: 4px;
+  border: none; background: none; font: inherit; font-size: 11px;
+  color: var(--ink-3); cursor: pointer;
+}
+.chat-clear:hover:not(:disabled) { color: var(--ink-2); text-decoration: underline; }
+.chat-clear:disabled { opacity: .5; cursor: default; }
+
 .chat-input {
   width: 100%; resize: none;
   font: inherit; padding: 9px 10px;

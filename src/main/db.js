@@ -798,28 +798,56 @@ class Index {
     ).get(...args);
   }
 
+  /**
+   * A subtree filter, in the form the file queries already use.
+   *
+   * Returned as a clause and its argument rather than as a string spliced into
+   * the SQL, so a folder name containing a quote or a percent sign is a folder
+   * name and not a query. Trailing separator included, so that scoping to
+   * "…/Photos" cannot also pull in "…/Photos Backup".
+   */
+  static _underClause(under) {
+    if (!under) return null;
+    const prefix = under.endsWith(path.sep) ? under : under + path.sep;
+    return { clause: `path LIKE ? ESCAPE '\\'`, arg: escapeLike(prefix) + '%' };
+  }
+
   /** Candidate groups for exact-duplicate detection: same size, more than one file. */
-  sizeCollisionGroups(scanId, minBytes = 4096) {
+  sizeCollisionGroups(scanId, minBytes = 4096, { under = null } = {}) {
+    const scope = Index._underClause(under);
     return this.db.prepare(`
       SELECT size, COUNT(*) AS n FROM files
-      WHERE scanId = ? AND isDirectory = 0 AND size >= ?
+      WHERE scanId = ? AND isDirectory = 0 AND size >= ?${scope ? ` AND ${scope.clause}` : ''}
       GROUP BY size HAVING n > 1 ORDER BY size DESC
-    `).all(scanId, minBytes);
+    `).all(...[scanId, minBytes, ...(scope ? [scope.arg] : [])]);
   }
 
-  filesOfSize(scanId, size) {
-    return this.db.prepare(
-      `SELECT path, size, fileId FROM files WHERE scanId = ? AND isDirectory = 0 AND size = ?`
-    ).all(scanId, size);
+  /**
+   * The files of one exact size.
+   *
+   * Scoped by the same subtree as the size groups that produced it. Without that
+   * the counts would disagree with the results: a size group counted inside the
+   * chosen folder would go on to collect its members from the whole scan, and a
+   * "duplicates in Downloads" search would report pairs that are not both in
+   * Downloads.
+   */
+  filesOfSize(scanId, size, { under = null } = {}) {
+    const scope = Index._underClause(under);
+    return this.db.prepare(`
+      SELECT path, size, fileId FROM files
+      WHERE scanId = ? AND isDirectory = 0 AND size = ?${scope ? ` AND ${scope.clause}` : ''}
+    `).all(...[scanId, size, ...(scope ? [scope.arg] : [])]);
   }
 
-  filesByExtensions(scanId, exts, minBytes = 0) {
+  filesByExtensions(scanId, exts, minBytes = 0, { under = null } = {}) {
     const marks = exts.map(() => '?').join(',');
+    const scope = Index._underClause(under);
     return this.db.prepare(`
       SELECT path, size, extension FROM files
-      WHERE scanId = ? AND isDirectory = 0 AND size >= ? AND extension IN (${marks})
+      WHERE scanId = ? AND isDirectory = 0 AND size >= ? AND extension IN (${marks})${
+        scope ? ` AND ${scope.clause}` : ''}
       ORDER BY size DESC
-    `).all(scanId, minBytes, ...exts);
+    `).all(...[scanId, minBytes, ...exts, ...(scope ? [scope.arg] : [])]);
   }
 
   // ── duplicates ───────────────────────────────────────────────────────────

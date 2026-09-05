@@ -18,7 +18,6 @@
 // writes it. The assistant proposes. This panel is where the person agrees.
 
 import * as voice from './voice.js';
-import * as wake from './wake.js';
 
 const nexa = window.nexa;
 
@@ -578,6 +577,10 @@ window.addEventListener('keydown', (event) => {
 
 function dismiss() {
   cancelListening();
+  // Walking away from a question stops it. Not awaited: the panel should close
+  // on the keystroke rather than after a round trip, and the main process
+  // abandons the turn either way.
+  nexa.overlay.cancel().catch(() => { /* nothing was running */ });
   nexa.overlay.hide();
 }
 
@@ -591,22 +594,35 @@ function dismiss() {
  * launch, every time — and both routes have to open it the same way.
  */
 async function opened({ spoken = false } = {}) {
-  state.status = await nexa.overlay.status().catch(() => null);
-  // Every visit starts clean. The alternative — reopening onto the answer to a
-  // question asked an hour ago — reads as the panel having been left running.
-  await nexa.overlay.reset().catch(() => {});
+  // Three independent round-trips, issued together rather than one after
+  // another. They were sequential, which put three IPC latencies in front of
+  // every single open for no reason: the reset does not depend on the status
+  // and neither depends on the settings. On the wake-word path this is now the
+  // only waiting left between hearing the phrase and a usable panel, so it is
+  // worth the `Promise.all`.
+  const [status, settings] = await Promise.all([
+    nexa.overlay.status().catch(() => null),
+    nexa.settings.get().catch(() => null),
+    // Every visit starts clean. The alternative — reopening onto the answer to
+    // a question asked an hour ago — reads as the panel having been left running.
+    nexa.overlay.reset().catch(() => {}),
+  ]);
+  state.status = status;
+
   Object.assign(state, {
     heard: '', reply: '', choice: null, conversion: null, results: null, error: null, stage: null,
   });
   setPhase('idle');
   input.value = '';
 
-  const settings = await nexa.settings.get().catch(() => null);
   applyTheme(settings);
   // Opened by the wake word, the microphone always arms: the user has just
   // spoken to it and is mid-sentence.
   const wantsMic = spoken || settings?.overlay?.listenOnOpen !== false;
-  if (wantsMic && state.status?.assistantConfigured) {
+  // `dictationConfigured` rather than `assistantConfigured`: a Groq key alone is
+  // enough to turn speech into text, and refusing the microphone because there
+  // is no Gemini key would disable dictation for the recommended setup.
+  if (wantsMic && (state.status?.dictationConfigured ?? state.status?.assistantConfigured)) {
     startListening();
   } else {
     input.focus();
@@ -674,41 +690,23 @@ nexa.settings.onThemeChange((payload) => applyTheme({ effective: payload }));
 
 // ── the wake word ───────────────────────────────────────────────────────────
 //
-// Off unless the user has switched it on. When it is on, the microphone is held
-// open by this hidden window and the operating system's recording indicator
-// stays lit — see the note at the top of wake.js for what is and is not sent
-// anywhere. Checking is suspended whenever the panel is open, because then its
-// own microphone is the one that matters.
-
-let wakeWanted = false;
-
-async function applyWakeSetting(settings) {
-  wakeWanted = !!settings?.overlay?.wakeWord
-    && !!settings?.overlay?.enabled
-    && !!state.status?.assistantConfigured;
-
-  if (!wakeWanted) {
-    wake.stop();
-    return;
-  }
-  if (wake.isListening()) return;
-
-  try {
-    await wake.start({
-      transcribe: (audio) => nexa.agent.transcribe(audio),
-      // Suspended while the panel is up, and while it is working: the answer to
-      // a question must not be interrupted by the room.
-      paused: () => state.phase !== 'idle' || document.visibilityState === 'visible',
-      onWake: async () => {
-        await nexa.overlay.showFromWake().catch(() => {});
-      },
-      onError: () => { /* a failed check is not worth interrupting anyone over */ },
-    });
-  } catch (err) {
-    // Reported once, where it can be seen, rather than silently not listening.
-    console.warn('[wake]', err.message);
-  }
-}
+// Not here any more. The recogniser runs in its own hidden window
+// (src/renderer/wake.html, driven by js/wake-host.js) and the main process
+// decides when it listens, because the main process is what knows whether this
+// panel is on screen. This module's only remaining part in it is that opening
+// with `reason: 'wake'` arms the microphone whatever "listen on open" says —
+// the user has just spoken to it, and is probably mid-sentence.
+//
+// A note for whoever reads this next to the previous implementation still in
+// git history: it drove the recogniser from here using
+// `document.visibilityState === 'visible'` as the "is the panel actually on
+// screen" check. That doesn't work — Electron keeps `visibilityState` at
+// `'visible'` for a hidden BrowserWindow when `backgroundThrottling:false` is
+// set (which this window needs, to keep recognising while another application
+// has focus), so the condition was permanently true and the wake word could
+// never actually fire. The dedicated listener window and the main-process-
+// driven `wake:panel` signal replaced that mechanism because of this bug, not
+// merely for cleanliness.
 
 (async function boot() {
   state.status = await nexa.overlay.status().catch(() => null);
@@ -722,12 +720,10 @@ async function applyWakeSetting(settings) {
   const ready = await nexa.overlay.ready().catch(() => null);
   if (ready?.visible) await opened({ spoken: ready.reason === 'wake' });
 
-  applyWakeSetting(settings);
 })();
 
 // A change in Settings takes effect now, not at the next launch.
 nexa.settings.onChanged?.(async (settings) => {
   state.status = await nexa.overlay.status().catch(() => state.status);
   applyTheme(settings);
-  applyWakeSetting(settings);
 });

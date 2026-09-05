@@ -111,6 +111,10 @@ node:sqlite and Electron's own nativeImage — nothing to npm install to run).
 - Voice input: press the mic in the composer and speak. The recording is
   captured in the renderer, downmixed to 16 kHz mono WAV, sent once for
   transcription and kept nowhere (never written to disk in either process).
+  Transcription is whisper-large-v3-turbo on Groq's free tier (a real ASR
+  model, ~300ms for 10s of speech); with no Groq key it falls back to the
+  Gemini path, which is what this used to be and is 5-10x slower and less
+  accurate. Engine + key live in settings.dictation; see llm/groq.js.
   The transcript lands IN THE TEXT BOX, not in the conversation — the user
   reads it, corrects it and presses Send, so a misheard sentence can never
   reach the agent on its own. The transcription request carries no tools and
@@ -208,9 +212,26 @@ main.js (Electron main process)
                                          <- rule-based file typing + real
                                             document text extraction, zero
                                             ML, zero training data.
-  -> src/main/llm/{gemini,agent,tools,attachments,voice}.js
+  -> src/main/llm/{gemini,groq,agent,tools,attachments,voice}.js
                                          <- the sandboxed assistant, plus
                                             speech-to-text for the composer.
+                                            voice.js routes between engines;
+                                            groq.js is Whisper turbo.
+  -> src/main/wake/{window,model-store}.js
+                                         <- the wake word. window.js owns the
+                                            hidden listener window (created
+                                            only while the setting is on, so
+                                            no window == no microphone);
+                                            model-store.js owns the 40 MB Vosk
+                                            acoustic model the
+                                            recogniser needs: fetched
+                                            once on enable, cached in userData,
+                                            served to the renderer over the
+                                            nexa-model: scheme. After that the
+                                            wake word makes no network calls
+                                            at all — "Hey Nexa" is matched
+                                            entirely on-device in
+                                            renderer/js/wake.js.
   -> src/main/settings.js               <- validated preference store
                                             (sanitise() refuses bad values
                                             at the boundary, never trusts

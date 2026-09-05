@@ -15,6 +15,12 @@
 //   "the model was never reached".
 
 const RATE_LIMIT_COOLDOWN_MS = 62_000;   // free-tier window is 60s; 2s of slack
+// A 500 or 503 is the service having a bad moment, not the request being wrong.
+// Sending the same call again a second later costs a second and turns an outright
+// failure into a slightly slow answer; the previous behaviour propagated the first
+// one and ended the turn.
+const TRANSIENT_RETRIES = 2;
+const TRANSIENT_BACKOFF_MS = 700;
 const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -27,6 +33,60 @@ const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
  */
 function answerText(parts) {
   return (parts || []).filter((p) => !p.thought).map((p) => p.text || '').join('').trim();
+}
+
+/**
+ * Turns an HTTP failure into something a person can act on.
+ *
+ * "Gemini HTTP 404" followed by 300 characters of JSON tells the user nothing they
+ * can do anything about. Each status below has one likely cause in this
+ * application, and naming it is the difference between an assistant that is dead
+ * for no stated reason and a setting the user can go and change. `transient` marks
+ * the ones worth sending again.
+ */
+function httpError(status, text, model) {
+  const rateLimited = status === 429 || /RESOURCE_EXHAUSTED/.test(text);
+  let message;
+  let code;
+  if (rateLimited) {
+    message = 'That key has reached its rate limit.';
+    code = 'RATE_LIMITED';
+  } else if (status === 400 && /API[_ ]?key/i.test(text)) {
+    message = 'The API key was rejected as invalid. Check it in Settings.';
+    code = 'BAD_KEY';
+  } else if (status === 400) {
+    message = `The request was rejected: ${extractApiMessage(text)}`;
+    code = 'BAD_REQUEST';
+  } else if (status === 401 || status === 403) {
+    message = 'The API key was refused. Check that it is current and that the ' +
+              'Generative Language API is enabled for it.';
+    code = 'KEY_REFUSED';
+  } else if (status === 404) {
+    message = `This key cannot call "${model}". Choose a different model in Settings.`;
+    code = 'NO_SUCH_MODEL';
+  } else if (status >= 500) {
+    message = `The Gemini service returned an error (HTTP ${status}).`;
+    code = 'UPSTREAM';
+  } else {
+    message = `Gemini HTTP ${status}: ${extractApiMessage(text)}`;
+    code = 'HTTP_ERROR';
+  }
+  const err = new Error(message);
+  err.status = status;
+  err.code = code;
+  err.rateLimited = rateLimited;
+  err.transient = status >= 500;
+  err.detail = String(text).slice(0, 300);
+  return err;
+}
+
+/** The API's own explanation, when it sent one, rather than the raw envelope. */
+function extractApiMessage(text) {
+  try {
+    const msg = JSON.parse(text)?.error?.message;
+    if (msg) return String(msg).slice(0, 200);
+  } catch { /* not JSON; fall through to the raw text */ }
+  return String(text).slice(0, 200);
 }
 
 class GeminiClient {
@@ -170,13 +230,45 @@ class GeminiClient {
     };
   }
 
-  async _callOnce(keyIndex, contents, systemInstruction, tools) {
+  /**
+   * Runs one call, retrying only what is worth retrying.
+   *
+   * A transient failure is the service or the network, and the same request sent
+   * again a moment later usually succeeds. Everything else — a rejected key, an
+   * unknown model, a malformed conversation — fails identically however many times
+   * it is sent, so it is raised at once rather than after three seconds of pointless
+   * waiting. A rate limit is not retried here either: the caller has another key to
+   * try, which is faster than waiting for this one to cool.
+   */
+  async _withTransientRetries(attempt, signal) {
+    let last;
+    for (let i = 0; i <= TRANSIENT_RETRIES; i++) {
+      try {
+        return await attempt();
+      } catch (err) {
+        if (!err.transient || err.rateLimited || signal?.aborted) throw err;
+        last = err;
+        if (i < TRANSIENT_RETRIES) {
+          await new Promise((r) => setTimeout(r, TRANSIENT_BACKOFF_MS * (i + 1)));
+        }
+      }
+    }
+    throw last;
+  }
+
+  async _callOnce(keyIndex, contents, systemInstruction, tools, signal = null) {
     const body = { contents };
     if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
     if (tools) body.tools = tools;
 
+    // Two things can end this request: the timeout, and the user pressing Stop.
+    // Both are aborts, and they are combined rather than raced by hand so that
+    // whichever fires first tears down the same fetch.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const composite = signal
+      ? AbortSignal.any([controller.signal, signal])
+      : controller.signal;
     try {
       const resp = await fetch(
         `${ENDPOINT}/${this.model}:generateContent?key=${encodeURIComponent(this.keys[keyIndex])}`,
@@ -184,17 +276,37 @@ class GeminiClient {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-          signal: controller.signal,
+          signal: composite,
         }
       );
       const text = await resp.text();
-      if (!resp.ok) {
-        const err = new Error(`Gemini HTTP ${resp.status}: ${text.slice(0, 300)}`);
-        err.status = resp.status;
-        err.rateLimited = resp.status === 429 || /RESOURCE_EXHAUSTED/.test(text);
-        throw err;
-      }
+      if (!resp.ok) throw httpError(resp.status, text, this.model);
       return JSON.parse(text);
+    } catch (err) {
+      // An abort is not a failure to report as one, and which abort it was decides
+      // what the user is told — so the two are told apart here rather than both
+      // surfacing as the opaque "This operation was aborted".
+      if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+        if (signal?.aborted) {
+          const stopped = new Error('Stopped.');
+          stopped.code = 'CANCELLED';
+          throw stopped;
+        }
+        const slow = new Error(
+          `The model did not answer within ${Math.round(this.timeoutMs / 1000)} seconds.`);
+        slow.code = 'TIMEOUT';
+        slow.transient = true;
+        throw slow;
+      }
+      // fetch itself failing is the network rather than the service, and is worth
+      // the same retry.
+      if (err instanceof TypeError) {
+        const net = new Error('Could not reach the Gemini API. Check the network connection.');
+        net.code = 'NETWORK';
+        net.transient = true;
+        throw net;
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -205,7 +317,12 @@ class GeminiClient {
    * @param {Array} contents Gemini `contents` array
    * @throws when no key could complete the request
    */
-  async generate(contents, { systemInstruction = null, tools = null } = {}) {
+  async generate(contents, { systemInstruction = null, tools = null, signal = null } = {}) {
+    if (signal?.aborted) {
+      const stopped = new Error('Stopped.');
+      stopped.code = 'CANCELLED';
+      throw stopped;
+    }
     if (this.keys.length === 0) {
       const err = new Error(
         'No Gemini API key is configured. Set GEMINI_API_KEYS in the environment, ' +
@@ -222,8 +339,10 @@ class GeminiClient {
       const idx = this._availableKeyIndex();
       if (idx === null) break;
       try {
-        return await this._callOnce(idx, contents, systemInstruction, tools);
+        return await this._withTransientRetries(
+          () => this._callOnce(idx, contents, systemInstruction, tools, signal), signal);
       } catch (err) {
+        if (err.code === 'CANCELLED') throw err;
         if (err.rateLimited) {
           this.cooldownUntil.set(idx, Date.now() + RATE_LIMIT_COOLDOWN_MS);
           errors.push(`key ${idx}: rate limited`);
@@ -241,8 +360,10 @@ class GeminiClient {
       const idx = this._availableKeyIndex();
       if (idx !== null) {
         try {
-          return await this._callOnce(idx, contents, systemInstruction, tools);
+          return await this._withTransientRetries(
+            () => this._callOnce(idx, contents, systemInstruction, tools, signal), signal);
         } catch (err) {
+          if (err.code === 'CANCELLED') throw err;
           if (err.rateLimited) this.cooldownUntil.set(idx, Date.now() + RATE_LIMIT_COOLDOWN_MS);
           errors.push(`key ${idx} after wait: ${err.message}`);
         }
@@ -269,4 +390,6 @@ class GeminiClient {
   }
 }
 
-module.exports = { GeminiClient, RATE_LIMIT_COOLDOWN_MS, DEFAULT_MODEL, answerText };
+module.exports = {
+  GeminiClient, RATE_LIMIT_COOLDOWN_MS, DEFAULT_MODEL, answerText, httpError,
+};

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!-- The listener. This document is never shown, never drawn, and never
+       renders anything that came from disk, from a file name, or from a model.
+       It exists to hold one microphone and one speech recogniser.
+
+       That is the whole reason it is a separate document. The recogniser needs
+       'unsafe-eval' — Vosk is Kaldi compiled through Emscripten, and the glue
+       that loads it builds functions from strings — and 'unsafe-eval' is a
+       permission worth confining. Granted in the panel it would sit in the same
+       document that renders file names and passages of user documents, where
+       one escaping mistake would become code execution. Granted here it sits in
+       a document with no content, no interface and no injection surface: the
+       only thing that reaches this page is audio from the microphone, and audio
+       is not script.
+
+       Everything else is still forbidden. There is no remote origin, no image,
+       no font and no style; connect-src allows exactly the custom scheme the
+       cached model is served over, and blob: for the worker the recogniser
+       creates from its own inlined source. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none';
+                 script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:;
+                 worker-src blob:;
+                 child-src blob:;
+                 connect-src 'self' blob: data: nexa-model:;
+                 form-action 'none';
+                 base-uri 'none';">
+  <title>NexaFiles listener</title>
+</head>
+<body>
+  <!-- Intentionally empty. If anything ever needs to be displayed to the user
+       about the wake word, it belongs in Settings, where they can see it. -->
+  <script defer src="vendor/vosk.js"></script>
+  <script type="module" src="js/wake-host.js"></script>
+</body>
+</html>

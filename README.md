@@ -314,6 +314,57 @@ scanner uses. Each is introduced by a header naming it as file content, and the
 system instruction says that content is data and never an instruction. A file
 that could not be read is reported as unread rather than described.
 
+The side panel and the overlay run two agents over the same tools, each with
+its own conversation and its own instruction — the panel answers a question, the
+overlay does one thing now — and both behave the same way in the four places
+that decide whether an assistant is usable rather than merely present.
+
+**It says what it is doing while it does it.** A question that asks about the
+contents of a document sends the assistant through every document it can reach
+inside a time budget, which takes tens of seconds. Progress is pushed to the
+panel as it happens — which tool is running, how many files have been read — so
+the wait is legible instead of being indistinguishable from a hang.
+
+**It can ask a question back.** When several files genuinely match what was
+asked for, the assistant calls `ask_user_to_choose` rather than picking one:
+choosing which of someone's documents to act on is not a decision a language
+model gets to make. The panel draws the candidates as a list, each row carrying
+the passage that put that file on it with the matched words marked, because what
+identifies a document is what it says rather than what it is called. The answer
+is checked against the options that were actually offered — a path nobody was
+shown is dropped rather than searched for.
+
+**It can be stopped.** A running question is abandoned on Stop, on Escape, or on
+dismissing the overlay. Nothing the assistant has can leave anything half-done —
+every tool either reads or produces a proposal — and the abandoned turn is
+removed from the conversation entirely, so the next question starts from the last
+exchange that finished. That last part is not tidiness: a turn left half-present,
+with function calls that were never answered, makes the API reject every request
+made afterwards, and one Stop would otherwise break the assistant until it was
+reset.
+
+**It stops growing.** Only the last few exchanges are resent. An unbounded
+history means every tool result ever returned — forty file listings, a hundred
+search snippets — is sent again on every subsequent turn, so a long session gets
+slower and more expensive and eventually exceeds the model's input limit and
+fails outright. The conversation is cut only at the start of a question, never
+between a function call and its response.
+
+Proposals are acted on in the panel where they were made. A conversion shows
+every destination before a byte is written, and approving it sends only the
+proposal's id — the paths never leave the main process, which is what stops an
+approval of the conversion the user read being redeemed for a different one. A
+cleanup plan goes to the Plan tab, where it is reviewed and approved like any
+other.
+
+Failure is reported as itself. A rate-limited key rotates to the next one and
+says how long the wait is; a server error is retried a couple of times, because
+a 503 is the service having a bad moment rather than the request being wrong;
+and anything that will fail identically however often it is sent — a rejected
+key, a model this key cannot call, a malformed conversation — is raised at once
+and named, so the user has a setting to change rather than an opaque HTTP code.
+No answer is ever fabricated for a question the model was never asked.
+
 A question can also be spoken. The microphone opens when the button is pressed
 and closes the moment it is pressed again — the tracks are stopped and the audio
 graph is torn down, so the operating system's recording indicator goes out with
@@ -474,23 +525,45 @@ A document nobody can see in their file manager is not one they are searching
 for, and skipping them is most of why an unindexed home directory is searchable
 in seconds rather than minutes.
 
-**"Hey Nexa" holds the microphone open, and costs privacy to use.** It is off by
-default. With it on, the level is measured on this machine and nothing is
-recorded while the room is quiet — but when someone speaks near the microphone,
-that utterance is captured, and if it is short enough to be a wake phrase (under
-2.5 seconds) it is sent to Google to be transcribed and checked. Longer speech is
-discarded locally without being sent. There is no way around that without
-shipping a keyword-spotting model, and this project has no runtime dependencies
-to carry one; an on-device detector written from scratch would be unreliable
-enough that people would leave the panel open instead, which is worse. The
-operating system's own recording indicator stays lit whenever it is listening,
-NexaFiles cannot suppress it, and that is deliberately the signal relied on.
+**"Hey Nexa" holds the microphone open, but nothing it hears leaves the machine.**
+It is off by default. With it on, the phrase is recognised here, by a speech
+model running inside this application — no audio, no transcript and no record
+that anyone spoke is sent anywhere, whether or not the phrase was heard. That is
+also why it is fast: the panel opens as the last syllable lands, rather than
+after a round-trip to a server.
 
-**The wake phrase is matched generously.** "Nexa" is not a word speech models
-have strong priors for, so "Nexus", "next" and "Nexo" are all accepted after a
-leading "hey". Being strict would mean a wake word that mostly does not wake;
-requiring the "hey" is what stops the panel opening whenever the application is
-mentioned in conversation.
+This used to work the other way, and it is worth saying what changed and what it
+cost. Every short utterance near the microphone was uploaded to be transcribed
+and checked, which was both a real privacy cost and the reason the feature was
+slow — one to three seconds between speaking and a panel, most of it network and
+model inference. It is now Vosk, a Kaldi recogniser compiled to WebAssembly,
+against a 40 MB acoustic model, running in a hidden window that exists only
+while the setting is on — no window, no microphone. The earlier version of this document said there
+was no way around the upload "without shipping a keyword-spotting model, and this
+project has no runtime dependencies to carry one". That was the wrong trade: the
+application already ships a browser engine, and the model is fetched once, on the
+first occasion someone actually switches the feature on. The operating system's
+own recording indicator stays lit whenever it is listening, NexaFiles cannot
+suppress it, and that is still deliberately the signal relied on.
+
+**The wake phrase is matched generously.** "Nexa" is not an English word, it is
+not in the recogniser's lexicon, and it never comes back spelled that way — so
+"Nexus", "next", "next a" and "Lexa" are all accepted after a leading "hey".
+Being strict would mean a wake word that mostly does not wake; requiring the
+"hey" is what stops the panel opening whenever somebody says "next" in a
+sentence. This is also why the phrase is matched rather than constrained by a
+grammar, which would be the usual way to spot a keyword: a Vosk grammar may only
+contain words the model already knows, and this one is not.
+
+**Dictation and the assistant are different models now.** Turning speech into
+text is done by `whisper-large-v3-turbo` on Groq's free tier — a speech
+recognition model, where the assistant's Gemini model was a chat model asked to
+transcribe as a side job. Ten seconds of speech comes back in about a third of a
+second rather than two to four, and it mishears far less. It needs a free key,
+set in Settings; with no key, dictation falls back to the Gemini path rather than
+failing. Recordings are still never written to disk, and the transcript still
+lands in the composer as text to read and send deliberately, never as a turn in
+the conversation.
 
 **Word, PowerPoint and Excel still need an office suite.** NexaFiles renders
 Markdown, plain text, HTML, CSV, TSV, JSON and logs to PDF itself, through the

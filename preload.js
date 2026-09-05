@@ -101,7 +101,7 @@ contextBridge.exposeInMainWorld('nexa', {
   },
 
   duplicates: {
-    find: (tier) => call('duplicates:find', tier),
+    find: (tier, opts) => call('duplicates:find', tier, opts || {}),
   },
 
   leftovers: {
@@ -186,6 +186,9 @@ contextBridge.exposeInMainWorld('nexa', {
     reveal: (filePath) => call('overlay:reveal', filePath),
     open: (filePath) => call('overlay:open', filePath),
     reset: () => call('overlay:reset'),
+    // Abandons a question still running. Nothing it had reached is kept and
+    // nothing on disk is touched either way.
+    cancel: () => call('overlay:cancel'),
     status: () => call('overlay:status'),
     // Raises the panel from the main window — the "Show it" button in Settings,
     // for someone whose chosen chord turned out to be taken.
@@ -219,5 +222,47 @@ contextBridge.exposeInMainWorld('nexa', {
     // asked until the user presses Send.
     transcribe: (audio) => call('agent:transcribe', audio),
     reset: () => call('agent:reset'),
+    // The user's answer to "which of these did you mean". Only ids the main
+    // process itself handed out are accepted, and only paths it actually offered.
+    choose: (choiceId, paths) => call('agent:choose', choiceId, paths || []),
+    // Stop. Abandons the turn in flight; nothing that had already been proposed
+    // is carried forward and nothing on disk is touched either way.
+    cancel: () => call('agent:cancel'),
+    // What the assistant is doing right now — which tool, how many documents read
+    // — pushed while it happens rather than summarised after it finishes.
+    onStage: (h) => on('agent:stage', h),
+  },
+
+  // Dictation and the wake word. Separate from `agent` because neither is the
+  // assistant: one turns speech into text for the composer, the other decides
+  // whether the panel should open at all.
+  voice: {
+    // Which engine would answer right now, and whether a limit is in force.
+    status: () => call('voice:status'),
+  },
+
+  wake: {
+    // Whether the acoustic model is on disk, and the URL to load it from.
+    modelStatus: () => call('wake:modelStatus'),
+    // Fetches it if it is not. Resolves once it is ready to use.
+    ensureModel: () => call('wake:ensureModel'),
+    cancelModel: () => call('wake:cancelModel'),
+    removeModel: () => call('wake:removeModel'),
+    // Bytes as they arrive, so a forty-megabyte download can show a bar.
+    onModelProgress: (h) => on('wake:modelProgress', h),
+
+    // ── the listener window's own channel ──────────────────────────────────
+    // Used only by src/renderer/js/wake-host.js. The panel has no reason to
+    // touch these: it no longer runs the recogniser.
+
+    // The listener announcing its handlers are bound. Answers with whatever
+    // instruction the main process was holding for it.
+    hostReady: () => call('wake:hostReady'),
+    // The phrase was heard. Raising the panel is the main process's decision,
+    // not the listener's — it re-checks the settings before showing anything.
+    heard: () => call('overlay:showFromWake'),
+    onArm: (h) => on('wake:arm', h),
+    onDisarm: (h) => on('wake:disarm', h),
+    onPanel: (h) => on('wake:panel', h),
   },
 });

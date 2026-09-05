@@ -23,6 +23,10 @@ const state = {
   fileList: { files: [], total: { n: 0, bytes: 0 }, under: null, category: null },
   plan: null,
   duplicates: null,
+  // Which folder the duplicate search is confined to, or null for the whole
+  // scan. Held here rather than read off the DOM so that switching views and
+  // coming back does not quietly widen a search the user narrowed.
+  dupeScope: null,
   leftovers: null,
   startup: null,
   system: null,
@@ -32,6 +36,14 @@ const state = {
   chat: [],
   chatAttachments: [],   // files dropped on the assistant, not yet sent
   chatDraft: '',         // what is in the composer but not yet sent
+  // A question is in flight. While it is, the composer is a Stop button: two
+  // questions against one conversation would interleave into nonsense, and the
+  // main process refuses the second anyway.
+  chatBusy: false,
+  // What the assistant is doing right now, in the user's terms — "Reading your
+  // documents… 220 read". A search across a disk takes tens of seconds, and a
+  // motionless "Thinking…" for that long reads as a hang.
+  chatStage: null,
 
   // Spoken input. `phase` is the only part the composer's markup depends on;
   // the level and the clock are written straight into the DOM twenty times a
@@ -330,6 +342,9 @@ async function startScan(root) {
   state.crumbs = [];
   state.selectedBlock = null;
   state.duplicates = null;
+  // A folder chosen under the previous scan may not exist in this one, and a
+  // stale scope would silently return nothing.
+  state.dupeScope = null;
   state.leftovers = null;
   state.plan = null;
   renderAll();
@@ -653,6 +668,46 @@ const TIERS = [
     'Videos reduced to one frame hash per second. Finds re-encodes of the same footage, and clips cut out of a longer file, reporting where in the original each clip begins.'],
 ];
 
+/**
+ * Where the duplicate search will look.
+ *
+ * Comparing files means comparing what the scan measured, so this narrows the
+ * search within the scan rather than starting a new one — which is why the
+ * button offers folders under the scan root and says so when one is refused.
+ * A search over one folder is a different measurement from a search over the
+ * whole scan, and the results below say which they were.
+ */
+function dupeScopeBar() {
+  const scoped = !!state.dupeScope;
+  return `
+    <div class="dupe-scope">
+      <span class="dupe-scope-label">Search in</span>
+      <span class="dupe-scope-value ${scoped ? 'narrowed' : ''}" title="${esc(state.dupeScope || state.scan.root)}">
+        ${icon(scoped ? 'folder' : 'disk', { size: 13 })}
+        <span>${scoped ? esc(shortenPath(state.dupeScope)) : 'Everything scanned'}</span>
+      </span>
+      <span class="dupe-scope-actions">
+        <button class="btn small" id="dupe-pick-folder">
+          ${icon('folderOpen', { size: 13 })} ${scoped ? 'Change folder' : 'Choose a folder'}
+        </button>
+        ${scoped ? `
+          <button class="btn small" id="dupe-clear-folder">
+            ${icon('x', { size: 13 })} Whole scan
+          </button>` : ''}
+      </span>
+    </div>`;
+}
+
+/** A path shortened from the middle: the start and the end both say where. */
+function shortenPath(p, max = 52) {
+  const s = String(p || '');
+  if (s.length <= max) return s;
+  const parts = s.split(/[\\/]/);
+  if (parts.length <= 2) return s.slice(0, max - 1) + '…';
+  const tail = parts.slice(-2).join('\\');
+  return `${parts[0]}\\…\\${tail}`;
+}
+
 function viewDuplicates() {
   if (!state.scan) return needScan('find duplicates');
 
@@ -664,6 +719,7 @@ function viewDuplicates() {
         Three methods, none of them machine learning. Each reports how it reached
         its conclusion so you can check it yourself.
       </p>
+      ${dupeScopeBar()}
       <div class="row" style="margin-top:14px;flex-wrap:wrap">
         ${TIERS.map(([id, label]) => `
           <button class="btn ${id === 'exact' ? 'primary' : ''}" data-dupe="${id}">
@@ -675,9 +731,12 @@ function viewDuplicates() {
     ${TIERS.map(([id, label, blurb]) => {
       const r = found[id];
       if (!r) return '';
+      const where = r.scopeName
+        ? `in ${esc(r.scopeName)}`
+        : 'across everything scanned';
       if (!r.groups.length) {
         return `<div class="panel"><header><h2>${label}</h2></header>
-          <p class="muted">None found. ${esc(blurb)}</p>
+          <p class="muted">None found ${where}. ${esc(blurb)}</p>
           <div class="panel-note">${esc(r.method)}</div></div>`;
       }
       return `
@@ -685,7 +744,7 @@ function viewDuplicates() {
           <header>
             <h2>${label}</h2>
             <span class="muted">${formatNumber(r.groups.length)} group(s),
-              ${formatBytes(r.totalWasted)} reclaimable</span>
+              ${formatBytes(r.totalWasted)} reclaimable ${where}</span>
             <div class="actions">
               <button class="btn primary small" data-dupe-plan="${id}">
                 ${icon('eye')} Build a plan
@@ -984,6 +1043,154 @@ function needScan(action) {
 
 // ── aside: plan preview and assistant ──────────────────────────────────────
 
+/**
+ * One message in the transcript.
+ *
+ * An assistant turn is not only prose. It can carry a question back to the user
+ * — a list of files that all match what they asked for — or a proposal to
+ * convert some of them, or the record of a conversion they approved. Each of
+ * those is a thing to act on rather than to read, so each gets its own block
+ * under the text rather than being flattened into a sentence.
+ */
+function chatMessage(m, index) {
+  return `
+    <div class="chat-msg ${m.role}">
+      <div class="who">${m.role === 'user' ? 'You' : 'Assistant'}</div>
+      ${m.files?.length ? `<div class="chat-files">${m.files.map((f) => `
+        <span class="chat-file">${icon(f.kind === 'image' ? 'image' : 'document', { size: 11 })}
+          ${esc(f.name)}</span>`).join('')}</div>` : ''}
+      ${m.text && !m.pending ? `<div class="body">${esc(m.text)}</div>` : ''}
+      ${m.pending ? chatPending(m) : ''}
+      ${m.choice ? chatChoice(m.choice, index) : ''}
+      ${m.conversion ? chatConversion(m.conversion, index) : ''}
+      ${m.results ? chatResults(m.results) : ''}
+      ${m.tools?.length ? `<div class="chat-tools">Used: ${
+        [...new Set(m.tools.map((t) => t.name))].map(esc).join(', ')}</div>` : ''}
+      ${m.attachmentNotes?.length ? `<div class="chat-tools">${
+        m.attachmentNotes.map((n) => esc(n.note)).join(' ')}</div>` : ''}
+    </div>`;
+}
+
+/** The live commentary under a question that has not been answered yet. */
+function chatPending(m) {
+  return `
+    <div class="chat-working">
+      <span class="chat-dots"><i></i><i></i><i></i></span>
+      <span class="chat-stage">${esc(state.chatStage || m.text || 'Thinking…')}</span>
+    </div>`;
+}
+
+/**
+ * "Which of these did you mean" — the question the assistant asks back.
+ *
+ * Every row shows the passage that put the file on the list, with the matched
+ * words marked, because the user is choosing between their own documents and the
+ * thing that identifies one is what it says, not its name. Answered lists stay
+ * on screen but stop being clickable: the choice was made and re-making it would
+ * ask the same question of a conversation that has moved on.
+ */
+function chatChoice(choice, index) {
+  const answered = !!choice.answered;
+  return `
+    <div class="chat-choice ${answered ? 'answered' : ''}">
+      <p class="choice-q">${esc(choice.question)}</p>
+      ${choice.options.map((o) => `
+        <button class="choice-file" data-choice="${index}" data-path="${esc(o.path)}"
+                ${answered ? 'disabled' : ''}
+                ${choice.answered === o.path ? 'aria-current="true"' : ''}>
+          <span class="choice-mark">${esc((o.extension || '?').slice(0, 4))}</span>
+          <span class="choice-text">
+            <span class="choice-name">${esc(o.name)}</span>
+            <span class="choice-meta">${esc(o.folder)}${
+              o.bytes != null ? ` · ${formatBytes(o.bytes)}` : ''}${
+              o.lastModified ? ` · ${esc(o.lastModified)}` : ''}</span>
+            ${o.snippet ? `<span class="choice-snip">${snippetHtml(o.snippet)}</span>`
+              : o.opening ? `<span class="choice-snip">${esc(o.opening)}</span>` : ''}
+          </span>
+        </button>`).join('')}
+    </div>`;
+}
+
+/**
+ * A search snippet, with the words that matched marked.
+ *
+ * The snippet arrives with its matched runs wrapped in the guillemets FTS5 was
+ * given, rather than in markup, so that nothing coming out of a file can be
+ * interpreted as HTML. It is escaped first and the markers are turned into tags
+ * afterwards, which is the only order in which that holds.
+ */
+function snippetHtml(snippet) {
+  return esc(String(snippet))
+    .replace(/‹/g, '<mark>')
+    .replace(/›/g, '</mark>');
+}
+
+/**
+ * A conversion the assistant proposed and nobody has approved yet.
+ *
+ * Every destination is shown before anything is written, because a conversion
+ * writes a file the user did not have. Approving it here sends only the
+ * proposal's id back: the paths never leave the main process, so an approval of
+ * one conversion cannot be redeemed for another.
+ */
+function chatConversion(c, index) {
+  const clashes = c.items.filter((i) => i.targetExists).length;
+  return `
+    <div class="chat-proposal ${c.spent ? 'spent' : ''}">
+      ${c.items.map((i) => `
+        <div class="proposal-row">
+          <span class="proposal-name" title="${esc(i.source)}">${esc(i.name)}</span>
+          <span class="proposal-arrow">→</span>
+          <span class="proposal-name to" title="${esc(i.target)}">${esc(i.targetName)}</span>
+          ${i.targetExists ? '<span class="proposal-tag">exists</span>' : ''}
+        </div>`).join('')}
+      <p class="proposal-note">Converted by ${esc(c.engine)}. The original is never
+         changed or removed — this adds a file beside it${
+         clashes ? ', under a numbered name where one is already there' : ''}.</p>
+      ${c.spent ? '' : `
+        <div class="proposal-actions">
+          <button class="btn primary" data-convert="${index}">
+            ${icon('check', { size: 14 })} Convert ${c.items.length === 1 ? 'it' : `all ${c.items.length}`} to ${esc(c.format.toUpperCase())}
+          </button>
+          <button class="btn" data-dismiss-conversion="${index}">Not now</button>
+        </div>`}
+    </div>`;
+}
+
+/** What a conversion actually produced, once it has run. */
+function chatResults(res) {
+  const made = (res.results || []).filter((r) => r.ok);
+  const failed = (res.results || []).filter((r) => !r.ok);
+  return `
+    <div class="chat-proposal done">
+      ${made.map((r) => `
+        <div class="proposal-row">
+          <span class="proposal-tag new">${esc(extOf(r.target))}</span>
+          <span class="proposal-name" title="${esc(r.target)}">${esc(baseName(r.target))}</span>
+          <span class="proposal-meta">${formatBytes(r.bytes)}</span>
+          <button class="proposal-link" data-reveal="${esc(r.target)}">Show</button>
+          <button class="proposal-link" data-open="${esc(r.target)}">Open</button>
+        </div>`).join('')}
+      ${failed.map((r) => `
+        <div class="proposal-row failed">
+          ${icon('caution', { size: 12 })}
+          <span class="proposal-name" title="${esc(r.source)}">${esc(baseName(r.source))}</span>
+          <span class="proposal-meta">${esc(r.error || 'could not be converted')}</span>
+        </div>`).join('')}
+    </div>`;
+}
+
+/** The label on a produced file, taken from the file itself rather than assumed. */
+function extOf(p) {
+  const name = baseName(p);
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot + 1).toUpperCase() : 'FILE';
+}
+
+function baseName(p) {
+  return String(p || '').split(/[\\/]/).pop();
+}
+
 function renderAside() {
   const tabs = document.getElementById('aside-tabs');
   const body = document.getElementById('aside-body');
@@ -998,6 +1205,19 @@ function renderAside() {
   if (liveInput) state.chatDraft = liveInput.value;
   const hadFocus = !!liveInput && document.activeElement === liveInput;
   const caret = liveInput ? liveInput.selectionStart : null;
+
+  // Whether the transcript was scrolled to its end, measured before the panel is
+  // replaced because afterwards the old position is gone. This decides whether
+  // the new content is followed. This shell re-renders on a timer — the session
+  // graph refreshes every fifteen seconds — so pinning unconditionally would
+  // repeatedly throw someone out of a transcript they had scrolled back through.
+  // Arriving on the tab counts as being at the end: the measurement in hand
+  // describes whatever the panel was showing before, which on a tab switch is the
+  // other tab's content and says nothing about the transcript.
+  const arriving = renderAside.lastTab !== 'chat';
+  renderAside.lastTab = state.asideTab;
+  const atBottom = arriving || !body.scrollHeight ||
+    body.scrollHeight - body.scrollTop - body.clientHeight < 48;
 
   tabs.querySelectorAll('button').forEach((b) => {
     b.setAttribute('aria-selected', String(b.dataset.tab === state.asideTab));
@@ -1022,22 +1242,16 @@ function renderAside() {
     return;
   }
 
-  body.innerHTML = state.chat.length ? state.chat.map((m) => `
-    <div class="chat-msg ${m.role}">
-      <div class="who">${m.role === 'user' ? 'You' : 'Assistant'}</div>
-      ${m.files?.length ? `<div class="chat-files">${m.files.map((f) => `
-        <span class="chat-file">${icon(f.kind === 'image' ? 'image' : 'document', { size: 11 })}
-          ${esc(f.name)}</span>`).join('')}</div>` : ''}
-      <div class="body">${esc(m.text)}</div>
-      ${m.tools?.length ? `<div class="chat-tools">Used: ${m.tools.map((t) => esc(t.name)).join(', ')}</div>` : ''}
-      ${m.attachmentNotes?.length ? `<div class="chat-tools">${
-        m.attachmentNotes.map((n) => esc(n.note)).join(' ')}</div>` : ''}
-    </div>`).join('') : `
+  body.innerHTML = state.chat.length
+    ? state.chat.map((m, i) => chatMessage(m, i)).join('')
+    : `
     <div style="padding:20px 4px">
-      <p class="muted">Ask about what the scan measured.</p>
+      <p class="muted">Ask about what the scan measured, or about what is inside
+         your documents — "the blog I wrote about elephants" finds the file by
+         reading them, not by guessing at filenames.</p>
       <p class="muted">The assistant can read the scan results and propose a
-         cleanup, but it cannot delete or move anything itself — every proposal
-         comes back here for you to approve.</p>
+         cleanup or a conversion to PDF, but it cannot delete, move or write
+         anything itself — every proposal comes back here for you to approve.</p>
       <p class="muted">Drop a file here, or drag one out of the Files view, and it
          will be read: a picture is sent as an image, a PDF, Word or text file as
          the text inside it.</p>
@@ -1045,6 +1259,13 @@ function renderAside() {
          written into the box below for you to read and correct — nothing is
          asked until you press Send.</p>
     </div>`;
+
+  // A transcript that grows off the bottom of a panel nobody scrolled is a
+  // transcript with the answer hidden in it — but only someone already reading
+  // the end wants to be carried along. Pinned after the paint rather than during
+  // it, because the new height is not known until the browser has laid the
+  // message out.
+  if (atBottom) requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
 
   foot.innerHTML = `
     ${state.chatAttachments.length ? `
@@ -1076,11 +1297,19 @@ function renderAside() {
         ${icon(state.voice.supported === false ? 'micOff'
           : state.voice.phase === 'recording' ? 'stopSquare' : 'mic')}
       </button>
-      <button class="btn primary" id="chat-send" style="flex:1;justify-content:center"
-              ${state.voice.phase !== 'idle' ? 'disabled' : ''}>
-        ${icon('send')} Send
-      </button>
-    </div>`;
+      ${state.chatBusy ? `
+        <button class="btn" id="chat-stop" style="flex:1;justify-content:center">
+          ${icon('stopSquare')} Stop
+        </button>` : `
+        <button class="btn primary" id="chat-send" style="flex:1;justify-content:center"
+                ${state.voice.phase !== 'idle' ? 'disabled' : ''}>
+          ${icon('send')} Send
+        </button>`}
+    </div>
+    ${state.chat.length ? `
+      <button class="chat-clear" id="chat-clear" ${state.chatBusy ? 'disabled' : ''}>
+        Clear this conversation
+      </button>` : ''}`;
 
   // Put the caret back where it was, so a re-render mid-sentence is invisible.
   if (hadFocus) {
@@ -1335,6 +1564,8 @@ function wireStage() {
     tr.addEventListener('dblclick', () => nexa.fs.revealNative(tr.dataset.file).catch(() => {}));
   });
 
+  stage.querySelector('#dupe-pick-folder')?.addEventListener('click', pickDuplicateFolder);
+  stage.querySelector('#dupe-clear-folder')?.addEventListener('click', clearDuplicateFolder);
   stage.querySelectorAll('[data-dupe]').forEach((b) => {
     b.addEventListener('click', () => runDuplicates(b.dataset.dupe));
   });
@@ -1392,20 +1623,48 @@ function wireAside() {
     });
   });
 
+  body.querySelectorAll('[data-choice]').forEach((b) => {
+    b.addEventListener('click', () => answerChoice(Number(b.dataset.choice), b.dataset.path));
+  });
+  body.querySelectorAll('[data-convert]').forEach((b) => {
+    b.addEventListener('click', () => approveConversion(Number(b.dataset.convert)));
+  });
+  body.querySelectorAll('[data-dismiss-conversion]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const m = state.chat[Number(b.dataset.dismissConversion)];
+      if (m?.conversion) { m.conversion.spent = true; renderAside(); }
+    });
+  });
+  body.querySelectorAll('[data-reveal]').forEach((b) => {
+    b.addEventListener('click', () => guard(() => nexa.fs.revealNative(b.dataset.reveal), 'Showing the file'));
+  });
+  body.querySelectorAll('[data-open]').forEach((b) => {
+    b.addEventListener('click', () => guard(() => nexa.fs.openNative(b.dataset.open), 'Opening the file'));
+  });
+
   foot.querySelector('#approve-plan')?.addEventListener('click', executePlan);
   foot.querySelector('#chat-send')?.addEventListener('click', sendChat);
+  foot.querySelector('#chat-stop')?.addEventListener('click', stopChat);
+  foot.querySelector('#chat-clear')?.addEventListener('click', clearChat);
   foot.querySelector('#chat-mic')?.addEventListener('click', toggleMic);
   foot.querySelector('#chat-mic-discard')?.addEventListener('click', discardRecording);
   foot.querySelector('#chat-input')?.addEventListener('input', (e) => {
     state.chatDraft = e.target.value;
   });
   foot.querySelector('#chat-input')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendChat();
-    // Escape is the universal "stop this", and a live microphone is the thing
-    // most worth being able to stop without aiming at a button.
-    if (e.key === 'Escape' && state.voice.phase === 'recording') {
+    // Enter sends, because this is a chat box and that is what a chat box does.
+    // Shift+Enter is the newline, and Ctrl/Cmd+Enter still sends for anyone who
+    // learned it that way.
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
-      discardRecording();
+      sendChat();
+      return;
+    }
+    // Escape is the universal "stop this": a live microphone first, then a
+    // question the assistant is still working on.
+    if (e.key === 'Escape') {
+      if (state.voice.phase === 'recording') { e.preventDefault(); discardRecording(); }
+      else if (state.chatBusy) { e.preventDefault(); stopChat(); }
     }
   });
 }
@@ -1413,16 +1672,53 @@ function wireAside() {
 // ── actions ────────────────────────────────────────────────────────────────
 
 async function runDuplicates(tier) {
-  state.busy = `Comparing files (${tier})…`;
+  const scope = state.dupeScope;
+  const where = scope ? shortenPath(scope, 34) : null;
+  state.busy = where
+    ? `Comparing files in ${where}…`
+    : `Comparing files (${tier})…`;
   renderAll();
-  const res = await guard(() => nexa.duplicates.find(tier), 'Duplicate scan');
+
+  const res = await guard(
+    () => nexa.duplicates.find(tier, { under: scope }), 'Duplicate scan');
   state.busy = null;
+
   if (res) {
     state.duplicates = { ...(state.duplicates || {}), [tier]: res };
+    // The toast names the folder for the same reason the panel does: a count
+    // with no scope attached reads as a statement about the whole disk.
+    const place = res.scopeName ? ` in ${res.scopeName}` : '';
     toast(res.groups.length
-      ? `${res.groups.length} group(s) found, ${formatBytes(res.totalWasted)} reclaimable.`
-      : 'No duplicates found.');
+      ? `${res.groups.length} group(s) found${place}, ${formatBytes(res.totalWasted)} reclaimable.`
+      : `No duplicates found${place}.`);
   }
+  renderAll();
+}
+
+/**
+ * Narrows the duplicate search to one folder.
+ *
+ * Offered from the scan root, because this filters what the scan already
+ * measured rather than starting a new one. A folder outside the scan is refused
+ * by the main process with a sentence saying so, which is surfaced as-is rather
+ * than being turned into a generic failure.
+ */
+async function pickDuplicateFolder() {
+  const picked = await guard(
+    () => nexa.roots.pick('Find duplicates in which folder?'), 'Choosing a folder');
+  if (!picked?.path) return;
+
+  state.dupeScope = picked.path;
+  // Results already on screen describe a different search, so they go rather
+  // than sitting under a heading that now says something else.
+  state.duplicates = null;
+  renderAll();
+  toast(`Duplicate searches will look in ${shortenPath(picked.path, 40)}.`);
+}
+
+function clearDuplicateFolder() {
+  state.dupeScope = null;
+  state.duplicates = null;
   renderAll();
 }
 
@@ -1524,8 +1820,59 @@ async function loadSystem() {
   renderAll();
 }
 
+/**
+ * One turn, however it was started.
+ *
+ * A typed question and an answer to "which of these did you mean" are the same
+ * thing from here: a message goes to the main process, a placeholder holds the
+ * bottom of the transcript while it runs, and whatever comes back replaces it.
+ * Everything that makes the turn interruptible or narratable lives here rather
+ * than being repeated at each call site.
+ */
+async function runTurn(send, { pendingText = 'Thinking…' } = {}) {
+  state.chatBusy = true;
+  state.chatStage = null;
+  state.chat.push({ role: 'assistant', text: pendingText, pending: true });
+  renderAside();
+
+  const res = await guard(send, 'Assistant');
+
+  state.chatBusy = false;
+  state.chatStage = null;
+  state.chat.pop();   // the placeholder
+
+  if (!res) { renderAside(); return null; }
+
+  // A stopped turn is not an answer and is not recorded as one. Saying so in one
+  // line is better than an empty bubble, which reads as the assistant having
+  // replied with nothing.
+  if (res.cancelled) {
+    state.chat.push({ role: 'assistant', text: 'Stopped.' });
+    renderAside();
+    return res;
+  }
+
+  state.chat.push({
+    role: 'assistant',
+    text: res.reply,
+    tools: res.toolCalls,
+    choice: res.choice || null,
+    conversion: res.conversion || null,
+    // Anything that could not be read is reported next to the reply rather
+    // than left for the user to infer from a vague answer.
+    attachmentNotes: (res.attachments || []).filter((a) => !a.ok),
+  });
+
+  if (res.plan) {
+    state.plan = res.plan;
+    toast('The assistant proposed a plan. Review it in the Plan tab before approving.');
+  }
+  renderAside();
+  return res;
+}
+
 async function sendChat() {
-  if (state.voice.phase !== 'idle') return;
+  if (state.voice.phase !== 'idle' || state.chatBusy) return;
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   const files = state.chatAttachments.filter((a) => !a.error);
@@ -1534,27 +1881,93 @@ async function sendChat() {
   input.value = '';
   state.chatDraft = '';
   const question = text || 'Describe the attached file(s).';
+  const paths = files.map((f) => f.path);
   state.chatAttachments = [];
   state.chat.push({ role: 'user', text: question, files });
-  state.chat.push({ role: 'assistant', text: files.length ? 'Reading the file…' : 'Thinking…' });
+
+  await runTurn(() => nexa.agent.send(question, paths),
+    { pendingText: files.length ? 'Reading the file…' : 'Thinking…' });
+}
+
+/** Stop. The turn is abandoned in the main process; nothing on disk is touched. */
+async function stopChat() {
+  if (!state.chatBusy) return;
+  state.chatStage = 'Stopping…';
+  renderAside();
+  await guard(() => nexa.agent.cancel(), 'Stopping');
+}
+
+/**
+ * The user picking a file from a list the assistant offered.
+ *
+ * The pick is echoed into the transcript as the user's own turn, because that is
+ * what it is — clicking a row is answering a question — and a conversation where
+ * the answer is invisible is one nobody can read back afterwards.
+ */
+async function answerChoice(index, chosenPath) {
+  if (state.chatBusy) return;
+  const message = state.chat[index];
+  const choice = message?.choice;
+  if (!choice || choice.answered) return;
+
+  const option = choice.options.find((o) => o.path === chosenPath);
+  choice.answered = chosenPath;
+  state.chat.push({ role: 'user', text: option ? option.name : chosenPath });
+  await runTurn(() => nexa.agent.choose(choice.id, [chosenPath]),
+    { pendingText: 'Opening that one…' });
+}
+
+/**
+ * Approving a conversion the assistant proposed.
+ *
+ * Only the proposal's id is sent. The paths stayed in the main process the whole
+ * time, which is what stops an approval of the conversion the user read being
+ * redeemed for a different one. Existing files are never overwritten: a clash
+ * gets a numbered name.
+ */
+async function approveConversion(index) {
+  const message = state.chat[index];
+  const proposal = message?.conversion;
+  if (!proposal || proposal.spent) return;
+
+  proposal.spent = true;
+  state.chatBusy = true;
+  state.chatStage = `Converting ${proposal.items.length} file(s)…`;
+  state.chat.push({ role: 'assistant', text: state.chatStage, pending: true });
   renderAside();
 
-  const res = await guard(() => nexa.agent.send(question, files.map((f) => f.path)), 'Assistant');
+  const res = await guard(
+    () => nexa.convert.executeProposal(proposal.id, { onConflict: 'rename' }),
+    'Converting');
+
+  state.chatBusy = false;
+  state.chatStage = null;
   state.chat.pop();
-  if (res) {
-    state.chat.push({
-      role: 'assistant',
-      text: res.reply,
-      tools: res.toolCalls,
-      // Anything that could not be read is reported next to the reply rather
-      // than left for the user to infer from a vague answer.
-      attachmentNotes: (res.attachments || []).filter((a) => !a.ok),
-    });
-    if (res.plan) {
-      state.plan = res.plan;
-      toast('The assistant proposed a plan. Review it before approving.');
-    }
+
+  if (!res) {
+    // The proposal was not spent after all, so it goes back to being offered.
+    proposal.spent = false;
+    renderAside();
+    return;
   }
+
+  state.chat.push({
+    role: 'assistant',
+    text: res.converted === 0
+      ? 'Nothing was converted.'
+      : `Converted ${res.converted} file${res.converted === 1 ? '' : 's'}${
+          res.failed ? `. ${res.failed} could not be converted.` : '.'}`,
+    results: res,
+  });
+  renderAside();
+}
+
+/** Forgets the conversation, in the panel and in the main process alike. */
+async function clearChat() {
+  if (state.chatBusy) return;
+  await guard(() => nexa.agent.reset(), 'Clearing');
+  state.chat = [];
+  state.chatStage = null;
   renderAside();
 }
 
@@ -1725,6 +2138,49 @@ function wireWindowDrops() {
   });
 }
 
+/**
+ * What a progress report says, in the user's terms.
+ *
+ * Tool names are internal — nobody asked about `search_file_contents` — and the
+ * stages that carry their own message (reading documents, converting) already
+ * say something better than any name would. Anything unrecognised falls back to
+ * "Working…" rather than leaking an identifier into the panel.
+ */
+function describeStage(payload) {
+  if (!payload) return null;
+  if (payload.message) return payload.message;
+  switch (payload.stage) {
+    case 'indexing':  return 'Reading your documents…';
+    case 'searching': return 'Searching…';
+    case 'converting': return 'Converting…';
+    case 'thinking':  return 'Thinking…';
+    case 'working':   return 'Working…';
+    case 'tool':      return describeTool(payload.tool);
+    default:          return 'Working…';
+  }
+}
+
+function describeTool(name) {
+  switch (name) {
+    case 'search_file_contents':   return 'Reading your documents…';
+    case 'read_document':          return 'Reading that file…';
+    case 'read_file_head':         return 'Looking inside that file…';
+    case 'ask_user_to_choose':     return 'Narrowing it down…';
+    case 'get_conversion_support': return 'Checking what can be converted…';
+    case 'propose_conversion':     return 'Preparing the conversion…';
+    case 'propose_cleanup':
+    case 'propose_quarantine':     return 'Drawing up a proposal…';
+    case 'get_scan_status':
+    case 'get_disk_composition':
+    case 'query_largest_files':    return 'Checking the last scan…';
+    case 'find_duplicates':        return 'Comparing files…';
+    case 'find_leftovers':         return 'Looking for leftovers…';
+    case 'list_startup_items':     return 'Reading what starts at login…';
+    case 'get_system_load':        return 'Measuring the system…';
+    default:                       return 'Working…';
+  }
+}
+
 async function boot() {
   // Asked once, so a build that cannot record shows a struck-through microphone
   // from the first frame rather than only after someone presses it.
@@ -1757,6 +2213,19 @@ async function boot() {
     if (current && p.current) current.textContent = p.current;
   });
 
+  // What the assistant is doing, while it does it. Only the one line inside the
+  // pending bubble is rewritten: re-rendering the whole panel on every progress
+  // tick would fight the caret in the composer, which is exactly the bug the
+  // draft-preserving code above this exists to undo.
+  nexa.agent.onStage((payload) => {
+    if (!state.chatBusy) return;
+    const next = describeStage(payload);
+    if (!next || next === state.chatStage) return;
+    state.chatStage = next;
+    const line = document.querySelector('#aside-body .chat-stage');
+    if (line) line.textContent = next;
+  });
+
   explorer.init(nexa, explorerHelpers());
   settings.init(nexa, settingsHelpers());
   wireWindowDrops();
@@ -1771,6 +2240,14 @@ async function boot() {
     explorer.state.showHidden = state.prefs.files.showHidden;
     explorer.state.sort = { key: state.prefs.files.sortKey, dir: state.prefs.files.sortDir };
   }
+  // Bytes as the wake word's acoustic model arrives. Only the Settings section
+  // draws it, and only while it is open — the check is cheap and the alternative
+  // is re-rendering the whole interface forty megabytes' worth of times.
+  nexa.wake.onModelProgress((p) => {
+    settings.state.wakeProgress = p;
+    if (state.view === 'settings') settings.rerenderProgress?.();
+  });
+
   // Setting the theme — from this interface or from Windows — makes the main
   // process the authority on what is now in force, so the answer is re-read
   // from it rather than patched into a copy taken at startup. Patching the

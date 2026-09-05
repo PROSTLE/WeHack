@@ -11,3 +11,9 @@ config.js
 # Test artefacts
 test/.tmp-*
 test/tools/*.png
+
+# Speech fixtures for the wake word. Regenerate with
+#   node test/tools/wake-truth.js --make-fixtures
+# The transcripts they produced are committed in test/wake.test.js, which is
+# what the suite actually asserts against, so the audio itself need not be.
+test/fixtures/wake/

@@ -34,13 +34,14 @@ const SAMPLE_BYTES = 4096;
  */
 async function findExactDuplicates(index, scanId, {
   minBytes = 4096,
+  under = null,
   onProgress = () => {},
   shouldCancel = () => false,
 } = {}) {
   const stats = { sizeGroups: 0, candidates: 0, sampled: 0, fullyHashed: 0, bytesHashed: 0 };
 
   // Step 1. Only files sharing an exact byte length can be identical.
-  const sizeGroups = index.sizeCollisionGroups(scanId, minBytes);
+  const sizeGroups = index.sizeCollisionGroups(scanId, minBytes, { under });
   stats.sizeGroups = sizeGroups.length;
 
   const groups = [];
@@ -48,7 +49,7 @@ async function findExactDuplicates(index, scanId, {
 
   for (const sg of sizeGroups) {
     if (shouldCancel()) break;
-    const files = index.filesOfSize(scanId, sg.size);
+    const files = index.filesOfSize(scanId, sg.size, { under });
     stats.candidates += files.length;
 
     // Hardlinks are the same bytes on disk already; deleting one reclaims
@@ -162,12 +163,13 @@ function hamming64(a, b) {
  *   file stays unit-testable outside the Electron runtime.
  */
 async function findSimilarImages(index, scanId, nativeImage, {
+  under = null,
   minBytes = 16384,
   maxDistance = 6,
   onProgress = () => {},
   shouldCancel = () => false,
 } = {}) {
-  const files = index.filesByExtensions(scanId, IMAGE_EXTS, minBytes);
+  const files = index.filesByExtensions(scanId, IMAGE_EXTS, minBytes, { under });
   const hashes = [];
   const stats = { examined: 0, decoded: 0, failed: 0 };
 
@@ -269,12 +271,13 @@ function simHash(text) {
 // pre-selected, and marked low confidence regardless.
 async function findSimilarText(index, scanId, {
   minBytes = 2048,
+  under = null,
   maxBytesRead = 1024 * 1024,
   maxDistance = 12,
   onProgress = () => {},
   shouldCancel = () => false,
 } = {}) {
-  const files = index.filesByExtensions(scanId, TEXT_EXTS, minBytes);
+  const files = index.filesByExtensions(scanId, TEXT_EXTS, minBytes, { under });
   const hashes = [];
   const stats = { examined: 0, hashed: 0, failed: 0 };
 

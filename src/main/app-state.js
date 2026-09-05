@@ -15,6 +15,8 @@ const { pathsInUse } = require('./system/processes');
 const { SessionRecorder } = require('./system/session');
 const { Settings } = require('./settings');
 const { GeminiClient } = require('./llm/gemini');
+const { GroqClient } = require('./llm/groq');
+const { WakeModelStore } = require('./wake/model-store');
 const { Agent } = require('./llm/agent');
 
 class AppState {
@@ -39,11 +41,21 @@ class AppState {
     // was shown, not whatever a later message claims was agreed.
     this.conversions = new Map();
 
-    // Open "which of these did you mean" questions from the overlay, keyed by
-    // id. They live here for the same reason conversions do: when the answer
-    // comes back, the paths it names are checked against the ones that were
-    // actually offered, rather than believed.
+    // Open "which of these did you mean" questions, keyed by id. They live here
+    // for the same reason conversions do: when the answer comes back, the paths it
+    // names are checked against the ones that were actually offered, rather than
+    // believed. The two panels keep separate sets because they keep separate
+    // conversations — an answer given in one is not an answer to the other's
+    // question, and letting either redeem the other's id would make it one.
     this.overlayChoices = new Map();
+    this.panelChoices = new Map();
+
+    // The in-flight requests, so a Stop or a dismissal has something to abort.
+    // One at a time per panel: the composer is disabled while a question is
+    // running, and a second concurrent turn against a single shared history would
+    // interleave into nonsense in any case.
+    this.panelRequest = null;
+    this.overlayRequest = null;
 
     // The passages the most recent content search matched on, keyed by path.
     // Held so that a follow-up "which of these did you mean" can show the user
@@ -77,6 +89,17 @@ class AppState {
       this.keySource = 'settings';
     }
     if (saved.model) this.gemini.setModel(saved.model);
+
+    // Dictation. The key may also come from the environment, which is how a
+    // developer runs this without putting a key in a settings file.
+    const dictation = this.settings.values.dictation;
+    this.groq = new GroqClient({
+      key: dictation.groqKey || process.env.GROQ_API_KEY || '',
+    });
+
+    // The wake word's acoustic model. Constructed always, downloaded only when
+    // the user switches the feature on — see src/main/wake/model-store.js.
+    this.wakeModel = new WakeModelStore(userDataDir);
 
     this.agent = null;         // the side panel's, built once tools are registered
     this.overlayAgent = null;  // the overlay's, with its own history and instruction

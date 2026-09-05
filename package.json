@@ -17,11 +17,13 @@
     "electron": "^37.2.0",
     "electron-builder": "^25.1.8"
   },
-  "dependencies": {},
+  "dependencies": {
+    "vosk-browser": "^0.0.8"
+  },
   "build": {
     "appId": "com.nexafiles.app",
     "productName": "NexaFiles",
-    "copyright": "Copyright © 2026 NexaFiles",
+    "copyright": "Copyright \u00a9 2026 NexaFiles",
     "files": [
       "main.js",
       "preload.js",

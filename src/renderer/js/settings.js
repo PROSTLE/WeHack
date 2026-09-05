@@ -32,6 +32,9 @@ export const state = {
   roots: null,
   busy: null,
   probe: null,          // the result of the last connection test
+  voice: null,          // which dictation engine would answer right now
+  wakeModel: null,      // whether the wake word's acoustic model is downloaded
+  wakeProgress: null,   // {received,total,ratio} while it is being fetched
   loading: false,
 };
 
@@ -56,6 +59,12 @@ export async function load({ force = false } = {}) {
   }
   if (force || !state.roots) {
     jobs.push(H.guard(() => nexa.roots.list(), 'Reading roots').then((v) => { state.roots = v; }));
+  }
+  if (force || !state.voice) {
+    jobs.push(nexa.voice.status().then((v) => { state.voice = v; }).catch(() => {}));
+  }
+  if (force || !state.wakeModel) {
+    jobs.push(nexa.wake.modelStatus().then((v) => { state.wakeModel = v; }).catch(() => {}));
   }
   if ((state.section === 'machine' && (force || !state.machine))) {
     jobs.push(H.guard(() => nexa.system.machine(), 'Reading machine details').then((v) => { state.machine = v; }));
@@ -336,19 +345,164 @@ function assistant() {
         have not answered stays put either way.</span>
     </label>
     <label class="set-check warn">
-      <input type="checkbox" id="set-overlay-wake" ${o.wakeWord ? 'checked' : ''}>
+      <input type="checkbox" id="set-overlay-wake" ${o.wakeWord ? 'checked' : ''}
+             ${state.wakeModel?.ready ? '' : 'disabled'}>
       <span><strong>Listen for “Hey Nexa”.</strong> This is the one setting in NexaFiles
-        that holds your microphone open. The level is measured on this machine and
-        nothing is recorded while the room is quiet; when someone speaks, that one
-        utterance is captured, and <em>if it is short enough to be a wake phrase</em>
-        — under two and a half seconds — it is sent to Google to be transcribed and
-        checked. Longer speech is discarded here without being sent. Your system’s
-        recording indicator stays lit the whole time this is on, and NexaFiles cannot
-        switch that off; it is the honest signal that the microphone is open.</span>
-    </label>`
+        that holds your microphone open. The phrase is now recognised <em>on this
+        machine</em>, by a speech model running in this application: no audio, no
+        transcript and no record that you spoke is sent anywhere, whether or not the
+        phrase was heard. That is also why it is fast — the panel opens as you finish
+        saying it, rather than after a round-trip to a server. Your system’s recording
+        indicator stays lit the whole time this is on, and NexaFiles cannot switch that
+        off; it is the honest signal that the microphone is open.
+        ${state.wakeModel?.ready ? '' : '<em>The speech model below has to be downloaded first.</em>'}</span>
+    </label>
+    ${wakeModelBlock()}`
   );
 
-  return keyPanel + modelPanel + overlayPanel + toolPanel;
+  return keyPanel + dictationPanel() + modelPanel + overlayPanel + toolPanel;
+}
+
+/**
+ * Dictation, which is now a different engine from the assistant.
+ *
+ * These were the same thing until recently, and the result was that the model
+ * chosen for answering questions was also the one asked to hear them — a
+ * general model doing speech recognition as a side job, slowly and not very
+ * well. They are separate settings because they are separate problems.
+ */
+function dictationPanel() {
+  const esc = H.esc;
+  const v = state.voice;
+  const d = state.settings?.dictation || {};
+
+  const status = !v ? '<span class="pill">Reading…</span>'
+    : v.engine === 'groq'
+      ? `<span class="pill ok">${icon('check', { size: 12 })} Groq ${esc(v.groq.model)}</span>
+         <span class="muted">fast, and a real speech model</span>`
+      : v.engine === 'gemini'
+        ? `<span class="pill">${icon('caution', { size: 12 })} Falling back to ${esc(v.gemini.model || 'Gemini')}</span>
+           <span class="muted">slower and less accurate; add a Groq key below</span>`
+        : `<span class="pill">${icon('caution', { size: 12 })} No engine</span>
+           <span class="muted">dictation is unavailable</span>`;
+
+  const cooling = v?.groq?.cooldownMs > 0
+    ? `<p class="set-hint">Groq's free limit is in force for another
+       ${Math.ceil(v.groq.cooldownMs / 1000)}s. Dictation falls back to Gemini until it lifts.</p>`
+    : '';
+
+  return panel(
+    'Dictation',
+    'What turns your speech into text in the composer. Groq runs ' +
+    '<span class="mono">whisper-large-v3-turbo</span>, which is a speech recognition model ' +
+    'rather than a chat model asked to transcribe: ten seconds of speech comes back in about ' +
+    'a third of a second, against two to four for the Gemini path, and it mishears far less. ' +
+    'Groq’s free tier needs an account but no card, and is rate-limited per minute and per ' +
+    'day. The key is written to <span class="mono">settings.json</span> in plain text, the ' +
+    'same as the Gemini keys, and is never shown back to this interface once saved.',
+    `
+    <div class="set-row">${status}</div>
+    ${cooling}
+    ${d.groqConfigured ? `
+      <div class="set-row"><span class="chip mono">${esc(d.groqKeyHint || '')}</span></div>` : ''}
+    <div class="set-field">
+      <label for="set-groq-key">Groq API key</label>
+      <div class="set-input-row">
+        <input type="password" id="set-groq-key" class="set-input mono" spellcheck="false"
+               autocomplete="off" placeholder="gsk_…">
+        <button class="btn primary" id="set-groq-save">${icon('check')} Save</button>
+        ${d.groqConfigured ? `<button class="btn" id="set-groq-clear">${icon('trash')} Clear</button>` : ''}
+      </div>
+      <p class="set-hint">Free from <span class="mono">console.groq.com/keys</span>. With no key
+        here, dictation falls back to the assistant’s Gemini model.</p>
+    </div>
+    <div class="set-field">
+      <label for="set-dictation-engine">Preferred engine</label>
+      <select id="set-dictation-engine" class="set-input">
+        <option value="groq" ${d.engine === 'groq' ? 'selected' : ''}>Groq — Whisper turbo (recommended)</option>
+        <option value="gemini" ${d.engine === 'gemini' ? 'selected' : ''}>Gemini — the assistant’s own model</option>
+      </select>
+      <p class="set-hint">Groq with no key saved falls back to Gemini rather than failing.</p>
+    </div>`
+  );
+}
+
+/**
+ * Repaints just the download bar.
+ *
+ * Called on every progress event, which arrive ten times a second for the
+ * length of a forty-megabyte download. Re-rendering the whole Settings view
+ * that many times would rebuild every panel on the page to move one div, so
+ * this reaches for the two nodes that actually change and leaves the rest of
+ * the document alone. If they are not on screen there is nothing to do.
+ */
+export function rerenderProgress() {
+  const p = state.wakeProgress;
+  if (!p) return;
+  const bar = document.querySelector('#set-wake-progress-bar');
+  const label = document.querySelector('#set-wake-progress-label');
+  if (!bar || !label) return;      // the section is not open, or the model is ready
+  const pct = Math.round((p.ratio || 0) * 100);
+  bar.style.width = `${pct}%`;
+  label.textContent = `${(p.received / 1e6).toFixed(0)} MB of ${(p.total / 1e6).toFixed(0)} MB`;
+  const pill = document.querySelector('#set-wake-progress-pill');
+  if (pill) pill.textContent = `Downloading the speech model — ${pct}%`;
+}
+
+/**
+ * The wake word's acoustic model.
+ *
+ * Presented as its own thing with its own download button rather than fetched
+ * silently when the checkbox is ticked: it is forty megabytes, and a checkbox
+ * that quietly pulls forty megabytes is a checkbox that lied about what it did.
+ */
+function wakeModelBlock() {
+  const m = state.wakeModel;
+  const p = state.wakeProgress;
+  const mb = (n) => `${(n / 1e6).toFixed(0)} MB`;
+
+  if (p && !m?.ready) {
+    const pct = Math.round((p.ratio || 0) * 100);
+    return `
+      <div class="set-field">
+        <div class="set-row">
+          <span class="pill" id="set-wake-progress-pill">Downloading the speech model — ${pct}%</span>
+          <span class="muted" id="set-wake-progress-label">${mb(p.received)} of ${mb(p.total)}</span>
+        </div>
+        <div class="set-progress">
+          <div class="set-progress-bar" id="set-wake-progress-bar" style="width:${pct}%"></div>
+        </div>
+        <div class="set-input-row">
+          <button class="btn" id="set-wake-cancel">Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  if (m?.ready) {
+    return `
+      <div class="set-field">
+        <div class="set-row">
+          <span class="pill ok">${icon('check', { size: 12 })} Speech model ready</span>
+          <span class="muted">${H.esc(m.id)} — recognition happens on this machine</span>
+        </div>
+        <div class="set-input-row">
+          <button class="btn" id="set-wake-remove">${icon('trash')} Remove it (${mb(m.bytes)})</button>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="set-field">
+      <div class="set-row">
+        <span class="pill">${icon('caution', { size: 12 })} Speech model not downloaded</span>
+      </div>
+      <p class="set-hint">“Hey Nexa” recognises the phrase on this machine rather than sending
+        audio away, which needs a ${mb(m?.bytes || 41184862)} acoustic model. It is fetched once and
+        cached; after that the wake word works with no network at all.</p>
+      <div class="set-input-row">
+        <button class="btn primary" id="set-wake-download">Download the speech model</button>
+      </div>
+    </div>`;
 }
 
 // ── this PC ────────────────────────────────────────────────────────────────
@@ -596,6 +750,84 @@ export function wire(stage) {
     saveOverlay({ wakeWord: ev.target.checked }));
   stage.querySelector('#set-overlay-try')?.addEventListener('click', async () => {
     await H.guard(() => nexa.overlay.show(), 'Opening the overlay');
+  });
+
+  // ── dictation ────────────────────────────────────────────────────────────
+
+  // Enter in the field saves, the same as the Gemini key above it. A key is
+  // pasted and then submitted, and reaching for the mouse to finish is exactly
+  // the friction that leaves a half-configured setting behind.
+  const saveGroqKey = async () => {
+    const field = stage.querySelector('#set-groq-key');
+    const key = (field?.value || '').trim();
+    if (!key) { H.toast('Paste a key first.', 'error'); return; }
+    const updated = await H.guard(
+      () => nexa.settings.set({ dictation: { groqKey: key } }), 'Saving the Groq key');
+    if (!updated) return;
+    if (field) field.value = '';
+    state.settings = updated;
+    state.voice = await nexa.voice.status().catch(() => state.voice);
+    H.toast(state.settings.dictation.groqConfigured
+      ? 'Dictation will use Groq from the next thing you say.'
+      : 'That key looked too short to be a Groq key.');
+    H.rerender();
+  };
+
+  stage.querySelector('#set-groq-save')?.addEventListener('click', saveGroqKey);
+  stage.querySelector('#set-groq-key')?.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); saveGroqKey(); }
+  });
+
+  stage.querySelector('#set-groq-clear')?.addEventListener('click', async () => {
+    const updated = await H.guard(
+      () => nexa.settings.set({ dictation: { groqKey: '' } }), 'Clearing the Groq key');
+    if (!updated) return;
+    state.settings = updated;
+    state.voice = await nexa.voice.status().catch(() => state.voice);
+    H.toast('The Groq key was cleared. Dictation falls back to Gemini.');
+    H.rerender();
+  });
+
+  stage.querySelector('#set-dictation-engine')?.addEventListener('change', async (ev) => {
+    const updated = await H.guard(
+      () => nexa.settings.set({ dictation: { engine: ev.target.value } }), 'Saving the engine');
+    if (!updated) return;
+    state.settings = updated;
+    state.voice = await nexa.voice.status().catch(() => state.voice);
+    H.rerender();
+  });
+
+  // ── the wake word's model ────────────────────────────────────────────────
+
+  stage.querySelector('#set-wake-download')?.addEventListener('click', async () => {
+    state.wakeProgress = { received: 0, total: state.wakeModel?.bytes || 0, ratio: 0 };
+    H.rerender();
+    try {
+      await nexa.wake.ensureModel();
+      state.wakeModel = await nexa.wake.modelStatus();
+      H.toast('The speech model is ready. “Hey Nexa” now works offline.');
+    } catch (err) {
+      H.toast(err?.message || 'The speech model could not be downloaded.');
+    } finally {
+      state.wakeProgress = null;
+      H.rerender();
+    }
+  });
+
+  stage.querySelector('#set-wake-cancel')?.addEventListener('click', async () => {
+    await nexa.wake.cancelModel().catch(() => {});
+  });
+
+  stage.querySelector('#set-wake-remove')?.addEventListener('click', async () => {
+    // Removing the model is also switching the feature off: leaving the checkbox
+    // ticked with nothing to recognise with would be a setting that claims to be
+    // listening and is not.
+    await H.guard(() => nexa.settings.set({ overlay: { wakeWord: false } }), 'Switching the wake word off');
+    await nexa.wake.removeModel().catch(() => {});
+    state.settings = await nexa.settings.get().catch(() => state.settings);
+    state.wakeModel = await nexa.wake.modelStatus().catch(() => null);
+    H.toast('The speech model was removed and “Hey Nexa” switched off.');
+    H.rerender();
   });
 
   stage.querySelector('#set-model')?.addEventListener('change', async (ev) => {

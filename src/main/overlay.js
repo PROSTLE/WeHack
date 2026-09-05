@@ -13,9 +13,9 @@
 //
 // "Hey Nexa" is the one way that changes, and it is off until someone switches
 // it on: it holds the microphone open, and the setting that enables it says so
-// in as many words rather than in a footnote. What is analysed locally and what
-// is sent away to be checked is written out in full at the top of
-// src/renderer/js/wake.js, which is where that listening actually happens.
+// in as many words rather than in a footnote. Nothing it hears leaves the
+// machine — the phrase is recognised on-device, which is written out in full at
+// the top of src/renderer/js/wake.js, where that listening actually happens.
 //
 // What it can do is bounded by exactly the same tools and the same approved-root
 // gate as the side panel. The overlay is a different way in, not a different set
@@ -23,6 +23,7 @@
 
 const path = require('path');
 const { BrowserWindow, globalShortcut, screen, shell } = require('electron');
+const wakeWindow = require('./wake/window');
 
 // Wide enough for a file path to be readable, narrow enough to sit beside real
 // work without covering it.
@@ -186,6 +187,10 @@ function show({ reason = 'hotkey' } = {}) {
   const win = get() || create();
   const bounds = win.getBounds();
   win.setBounds({ ...placement(bounds.height - GUTTER * 2) });
+  // The listener stops recognising while the panel is up: from here the panel's
+  // own microphone is the one that matters, and the wake word firing again over
+  // an open panel would be the assistant interrupting itself.
+  wakeWindow.setPanelOpen(true);
   win.showInactive();
   // Shown inactive first, then focused: on macOS this is what stops the panel
   // stealing the caret from the application the user was typing in until it is
@@ -206,6 +211,7 @@ function hide() {
   if (!win) return false;
   win.webContents.send('overlay:hidden');
   win.hide();
+  wakeWindow.setPanelOpen(false);
   return true;
 }
 

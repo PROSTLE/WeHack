@@ -26,6 +26,16 @@ const THEMES = ['system', 'light', 'dark'];
 const HOTKEY_PATTERN = /^(?:(?:Command|Cmd|Control|Ctrl|CommandOrControl|CmdOrCtrl|Alt|Option|AltGr|Shift|Super|Meta)\+)*[A-Za-z0-9]{1,12}$/;
 const DEFAULT_HOTKEY = process.platform === 'darwin' ? 'Alt+Space' : 'Control+Alt+Space';
 const LAYOUTS = ['details', 'list', 'tiles', 'icons'];
+
+// Which engine turns speech into text in the composer.
+//
+//   groq   — Whisper large v3 turbo on Groq's free tier. A real speech
+//            recognition model, roughly ten times faster than the Gemini path
+//            and markedly more accurate. Needs a free key, which is why it is
+//            not simply hardcoded as the only option.
+//   gemini — the original path, kept as the fallback for someone who has a
+//            Gemini key and does not want a second account.
+const DICTATION_ENGINES = ['groq', 'gemini'];
 const SORT_KEYS = ['name', 'mtimeMs', 'typeLabel', 'size'];
 
 function defaults() {
@@ -34,6 +44,13 @@ function defaults() {
     assistant: {
       model: null,          // null means "whatever the client's default is"
       keys: [],
+    },
+    dictation: {
+      // Groq when a key is present, Gemini otherwise. Resolved at call time
+      // rather than here, so adding a key upgrades the engine without the user
+      // having to find a second setting and change it too.
+      engine: 'groq',
+      groqKey: '',
     },
     files: {
       layout: 'details',
@@ -51,9 +68,11 @@ function defaults() {
       // Whether the panel closes when it loses focus. Off would leave a floating
       // window over everything until dismissed, which some people prefer.
       hideOnBlur: true,
-      // "Hey Nexa". Off by default, and it is the only setting in this file that
-      // holds a microphone open — see src/renderer/js/wake.js for exactly what
-      // is analysed here and what is sent away to be checked.
+      // "Hey Nexa". Off by default, and it is the only setting in this file
+      // that holds a microphone open. Nothing it hears is sent anywhere — the
+      // phrase is recognised on this machine; see src/renderer/js/wake.js.
+      // It also needs the acoustic model to have been downloaded, which is why
+      // switching it on is not by itself enough to make it listen.
       wakeWord: false,
     },
   };
@@ -73,6 +92,7 @@ function sanitise(raw, base = defaults()) {
     ...defaults(),
     ...base,
     assistant: { ...defaults().assistant, ...(base.assistant || {}) },
+    dictation: { ...defaults().dictation, ...(base.dictation || {}) },
     files: { ...defaults().files, ...(base.files || {}) },
     overlay: { ...defaults().overlay, ...(base.overlay || {}) },
   };
@@ -98,6 +118,18 @@ function sanitise(raw, base = defaults()) {
         .slice(0, 8);
     }
   }
+
+  const d = raw.dictation;
+  if (d && typeof d === 'object') {
+    if (DICTATION_ENGINES.includes(d.engine)) out.dictation.engine = d.engine;
+    // An empty string is a deliberate "forget my key", so it is accepted where
+    // a short non-empty string is refused as a paste that went wrong.
+    if (typeof d.groqKey === 'string') {
+      const key = d.groqKey.trim();
+      if (key === '' || key.length >= 20) out.dictation.groqKey = key;
+    }
+  }
+  if (!DICTATION_ENGINES.includes(out.dictation.engine)) out.dictation.engine = 'groq';
 
   const o = raw.overlay;
   if (o && typeof o === 'object') {
@@ -167,8 +199,16 @@ class Settings {
         keyHints: keys.map((k) => `…${k.slice(-4)}`),
         source: keys.length ? 'settings' : null,
       },
+      dictation: {
+        engine: this.values.dictation.engine,
+        // Same rule as the Gemini keys: presence and a hint, never the key.
+        groqConfigured: this.values.dictation.groqKey.length > 0,
+        groqKeyHint: this.values.dictation.groqKey
+          ? `…${this.values.dictation.groqKey.slice(-4)}`
+          : null,
+      },
     };
   }
 }
 
-module.exports = { Settings, defaults, sanitise, THEMES, LAYOUTS, SORT_KEYS };
+module.exports = { Settings, defaults, sanitise, THEMES, LAYOUTS, SORT_KEYS, DICTATION_ENGINES };

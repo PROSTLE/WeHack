@@ -42,12 +42,13 @@ const DOC_EXTS = [
  */
 async function findSimilarDocuments(index, scanId, algo, {
   minBytes = 2048,
+  under = null,
   maxDistance = 12,
   minChars = 120,
   onProgress = () => {},
   shouldCancel = () => false,
 } = {}) {
-  const files = index.filesByExtensions(scanId, DOC_EXTS, minBytes);
+  const files = index.filesByExtensions(scanId, DOC_EXTS, minBytes, { under });
   const hashes = [];
   const stats = {
     examined: 0, fromCache: 0, extracted: 0, fingerprinted: 0,
@@ -197,6 +198,7 @@ function parseSig(text) {
  */
 async function findVideoDuplicates(index, scanId, {
   minBytes = 1 << 20,
+  under = null,
   denseMaxBytes = 2 * (1 << 30),
   coarseFrames = 24,
   wholeVideoMinRatio = 0.75,
@@ -212,7 +214,7 @@ async function findVideoDuplicates(index, scanId, {
     };
   }
 
-  const files = index.filesByExtensions(scanId, video.VIDEO_EXTS, minBytes);
+  const files = index.filesByExtensions(scanId, video.VIDEO_EXTS, minBytes, { under });
   const fps = [];
   const stats = {
     available: true, examined: 0, fromCache: 0, probed: 0,

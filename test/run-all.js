@@ -18,6 +18,9 @@ const NODE_SUITES = [
   ['document text extraction', 'extract.test.js'],
   ['files dropped on the assistant', 'attachments.test.js'],
   ['spoken input to the assistant', 'voice.test.js'],
+  ['the agent loop: memory, stopping, and honest failure', 'agent.test.js'],
+  ['dictation engines and the wake model', 'dictation.test.js'],
+  ['the wake phrase, on recorded speech', 'wake.test.js'],
   ['video sub-clip detection', 'video.test.js'],
   ['document and video duplicates', 'content-dupes.test.js'],
   ['searching inside documents', 'content-index.test.js'],
@@ -40,12 +43,18 @@ const ELECTRON_SUITES = [
   // Conversion through the bridge: destination shown before writing, source left
   // intact, no silent overwrite, and the protected-path guard still holding.
   ['conversion, end to end', path.join('tools', 'e2e-convert.js')],
+  // Duplicate detection confined to one folder: that the filter actually filters,
+  // that a sibling sharing a name prefix is excluded, and that the control in the
+  // Duplicates view drives it.
+  ['duplicates scoped to a folder', path.join('tools', 'dupe-scope.js')],
+  ['the folder-scope control, end to end', path.join('tools', 'dupe-scope-ui.js')],
   // Walks every view and asks Chromium whether each control the user can see
   // actually has a listener bound to it. Nothing in this interface is inert.
   // The overlay panel: the window, the morph, every refusal it relies on, the
   // content search, and a real document converted to a real PDF. No model is
   // called — see the note at the top of that file.
   ['the overlay panel, end to end', path.join('tools', 'e2e-overlay.js')],
+  ['the wake word\u2019s listener window', path.join('tools', 'wake-window.js')],
   ['every control in the interface', path.join('tools', 'e2e-ui-audit.js')],
 ];
 

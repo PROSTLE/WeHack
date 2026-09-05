@@ -2,9 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <!-- The same policy the main window holds to. This panel reads files through
-       the bridge and loads nothing over the network, so every remote origin is
-       forbidden outright rather than merely unused. -->
+  <!-- The same policy the main window holds to, and deliberately unchanged by
+       the wake word. This panel reads files through the bridge and loads
+       nothing over the network, so every remote origin is forbidden outright
+       rather than merely unused.
+
+       The speech recogniser does need a looser policy than this — its
+       WebAssembly glue uses eval — and it does not run here. It runs in
+       src/renderer/wake.html, a document that draws nothing and never renders a
+       file name, so the permission stays where it cannot be turned into
+       anything by a mistake in this panel's escaping. -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none';
                  script-src 'self';

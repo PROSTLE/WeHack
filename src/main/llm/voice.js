@@ -3,7 +3,27 @@
 //
 // The microphone is opened in the renderer, where the Web Audio API lives, and
 // arrives here as a finished WAV recording. This module does one thing with it:
-// asks the model what was said, and returns the words. Three rules hold:
+// works out what was said, and returns the words.
+//
+// WHICH ENGINE DOES THAT
+//
+// Two, and the choice is made per call rather than at startup:
+//
+//   Groq   — Whisper large v3 turbo. A speech recognition model, so it has no
+//            conversational habits to suppress, and it is fast: ten seconds of
+//            speech comes back in roughly a third of a second. This is the
+//            default whenever a key is present.
+//   Gemini — the original path, and now the fallback. It is a general model
+//            asked to transcribe, which is why everything below `tidy` exists:
+//            fenced blocks, "Transcript:" labels and invented sentences are all
+//            things it does and a real ASR model does not.
+//
+// Routing is by capability rather than by configuration alone: `groq` selected
+// with no key falls back to Gemini rather than failing, because a user who has
+// not finished setting up dictation should get working dictation, not an error
+// about a preference they never knowingly set.
+//
+// Three rules hold whichever engine answers:
 //
 //   1. The recording is never written to disk. It exists as a buffer for the
 //      duration of one request and is dropped when that request returns. There
@@ -57,14 +77,33 @@ function tidy(text) {
 }
 
 /**
+ * Picks the engine for this call.
+ *
+ * Accepts either a bare Gemini client — which is how this module was called
+ * before there was a choice, and how the tests still call it — or a router
+ * describing both engines and the preference between them.
+ */
+function resolveEngine(clients) {
+  // A bare client: anything with `generate` is the Gemini path.
+  if (clients && typeof clients.generate === 'function') {
+    return { engine: 'gemini', gemini: clients, groq: null };
+  }
+  const { gemini = null, groq = null, engine = 'groq' } = clients || {};
+  // The preference only holds if the engine it names can actually run.
+  if (engine === 'groq' && groq?.available) return { engine: 'groq', gemini, groq };
+  return { engine: 'gemini', gemini, groq };
+}
+
+/**
  * Transcribes one recording.
  *
- * @param {import('./gemini').GeminiClient} gemini the configured client
+ * @param {object} clients either a Gemini client, or `{ gemini, groq, engine }`
  * @param {{ data: string, mimeType: string }} audio base64 payload from the renderer
- * @returns {Promise<{ text: string, empty: boolean, bytes: number, ms: number }>}
+ * @returns {Promise<{ text: string, empty: boolean, bytes: number, ms: number, engine: string }>}
  * @throws when the audio is unusable or the model could not be reached
  */
-async function transcribe(gemini, audio) {
+async function transcribe(clients, audio) {
+  const { engine, gemini, groq } = resolveEngine(clients);
   const mimeType = String(audio?.mimeType || '').split(';')[0].trim().toLowerCase();
   if (!ACCEPTED_MIME.has(mimeType)) {
     throw new Error(`${mimeType || 'That audio format'} cannot be transcribed.`);
@@ -87,6 +126,30 @@ async function transcribe(gemini, audio) {
       'Ask it in a shorter sentence, or type it.'
     );
     err.code = 'TOO_LONG';
+    throw err;
+  }
+
+  // Groq: a real ASR model, so the answer is the transcript and none of the
+  // unwrapping below applies to it.
+  if (engine === 'groq') {
+    try {
+      const out = await groq.transcribe(Buffer.from(data, 'base64'), mimeType);
+      const text = tidy(out.text);
+      return { text, empty: text.length === 0, bytes, ms: out.ms, engine: 'groq' };
+    } catch (err) {
+      // A key that is wrong, or a limit that is in force, is the user's to fix
+      // and is reported as itself. Anything else — Groq down, the network gone
+      // — falls through to Gemini when there is a Gemini to fall through to,
+      // because a working transcript beats a correct error message.
+      const fatal = err.code === 'BAD_KEY' || err.code === 'RATE_LIMITED' || err.code === 'TOO_LONG';
+      if (fatal || !gemini?.available) throw err;
+      console.warn(`[voice] Groq failed (${err.code || 'error'}), falling back to Gemini: ${err.message}`);
+    }
+  }
+
+  if (!gemini) {
+    const err = new Error('No transcription engine is configured.');
+    err.code = 'NO_ENGINE';
     throw err;
   }
 
@@ -124,7 +187,7 @@ async function transcribe(gemini, audio) {
   const parts = resp?.candidates?.[0]?.content?.parts || [];
   const text = tidy(parts.filter((p) => !p.thought).map((p) => p.text || '').join(''));
 
-  return { text, empty: text.length === 0, bytes, ms: Date.now() - started };
+  return { text, empty: text.length === 0, bytes, ms: Date.now() - started, engine: 'gemini' };
 }
 
-module.exports = { transcribe, ACCEPTED_MIME, MAX_AUDIO_BYTES, MIN_AUDIO_BYTES, tidy };
+module.exports = { transcribe, resolveEngine, ACCEPTED_MIME, MAX_AUDIO_BYTES, MIN_AUDIO_BYTES, tidy };
