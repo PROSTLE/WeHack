@@ -284,7 +284,71 @@ function assistant() {
     </div>`
   );
 
-  return keyPanel + modelPanel + toolPanel;
+  const o = state.settings?.overlay || {};
+  const bound = state.settings?.overlayHotkeyBound;
+  const overlayPanel = panel(
+    'The overlay panel',
+    'A second, floating panel that opens over whatever you are doing, on one keystroke, ' +
+    'anywhere — to find a document by what is inside it and convert it without going ' +
+    'looking for this window first. It is not always listening: the microphone opens ' +
+    'when the panel opens and closes when it closes, and there is no state in which it ' +
+    'is hidden and recording.',
+    `
+    <div class="set-row">
+      ${o.enabled
+        ? (bound && bound.ok === false
+          ? `<span class="pill bad">${icon('caution', { size: 12 })} ${esc(bound.why || 'the shortcut could not be claimed')}</span>`
+          : `<span class="pill ok">${icon('check', { size: 12 })} ${esc(bound?.hotkey || o.hotkey)} is bound</span>`)
+        : `<span class="pill">${icon('info', { size: 12 })} switched off</span>`}
+    </div>
+
+    <div class="set-field">
+      <label for="set-overlay-hotkey">The key that opens it</label>
+      <div class="set-input-row">
+        <input type="text" id="set-overlay-hotkey" class="set-input mono" spellcheck="false"
+               autocomplete="off" value="${esc(o.hotkey || '')}" placeholder="Control+Alt+Space">
+        <button class="btn primary" id="set-overlay-hotkey-save">${icon('check')} Bind</button>
+        <button class="btn" id="set-overlay-try" ${o.enabled ? '' : 'disabled'}>
+          ${icon('eye')} Show it
+        </button>
+      </div>
+      <p class="set-hint">Written the way Electron names chords —
+        <span class="mono">Control</span>, <span class="mono">Alt</span>,
+        <span class="mono">Shift</span>, <span class="mono">CommandOrControl</span>,
+        joined by <span class="mono">+</span>. A chord another application already
+        owns cannot be claimed, and this panel says so rather than leaving you
+        pressing a key that does nothing.</p>
+    </div>
+
+    <label class="set-check">
+      <input type="checkbox" id="set-overlay-enabled" ${o.enabled ? 'checked' : ''}>
+      <span><strong>Enable the overlay.</strong> Off releases the shortcut and closes the
+        hidden window it lives in.</span>
+    </label>
+    <label class="set-check">
+      <input type="checkbox" id="set-overlay-listen" ${o.listenOnOpen ? 'checked' : ''}>
+      <span><strong>Open the microphone with the panel.</strong> Off opens it ready to be
+        typed into instead; the microphone button still works.</span>
+    </label>
+    <label class="set-check">
+      <input type="checkbox" id="set-overlay-blur" ${o.hideOnBlur ? 'checked' : ''}>
+      <span><strong>Dismiss it when it loses focus.</strong> A panel holding a question you
+        have not answered stays put either way.</span>
+    </label>
+    <label class="set-check warn">
+      <input type="checkbox" id="set-overlay-wake" ${o.wakeWord ? 'checked' : ''}>
+      <span><strong>Listen for “Hey Nexa”.</strong> This is the one setting in NexaFiles
+        that holds your microphone open. The level is measured on this machine and
+        nothing is recorded while the room is quiet; when someone speaks, that one
+        utterance is captured, and <em>if it is short enough to be a wake phrase</em>
+        — under two and a half seconds — it is sent to Google to be transcribed and
+        checked. Longer speech is discarded here without being sent. Your system’s
+        recording indicator stays lit the whole time this is on, and NexaFiles cannot
+        switch that off; it is the honest signal that the microphone is open.</span>
+    </label>`
+  );
+
+  return keyPanel + modelPanel + overlayPanel + toolPanel;
 }
 
 // ── this PC ────────────────────────────────────────────────────────────────
@@ -503,6 +567,36 @@ export function wire(stage) {
   });
 
   stage.querySelector('#set-models-refresh')?.addEventListener('click', loadModels);
+
+  // The overlay's controls. Each writes to the running process and re-reads what
+  // came back, because binding a shortcut can fail — another application may
+  // already hold that chord — and the answer to "did that work" has to come from
+  // the attempt rather than from the fact that a value was saved.
+  const saveOverlay = async (patch) => {
+    state.settings = await H.guard(() => nexa.settings.set({ overlay: patch }), 'Saving');
+    H.rerender();
+    const bound = state.settings?.overlayHotkeyBound;
+    if (bound && bound.ok === false && bound.why) H.toast(bound.why, 'error');
+  };
+
+  stage.querySelector('#set-overlay-hotkey-save')?.addEventListener('click', () => {
+    const field = stage.querySelector('#set-overlay-hotkey');
+    saveOverlay({ hotkey: field.value.trim() });
+  });
+  stage.querySelector('#set-overlay-hotkey')?.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') saveOverlay({ hotkey: ev.target.value.trim() });
+  });
+  stage.querySelector('#set-overlay-enabled')?.addEventListener('change', (ev) =>
+    saveOverlay({ enabled: ev.target.checked }));
+  stage.querySelector('#set-overlay-listen')?.addEventListener('change', (ev) =>
+    saveOverlay({ listenOnOpen: ev.target.checked }));
+  stage.querySelector('#set-overlay-blur')?.addEventListener('change', (ev) =>
+    saveOverlay({ hideOnBlur: ev.target.checked }));
+  stage.querySelector('#set-overlay-wake')?.addEventListener('change', (ev) =>
+    saveOverlay({ wakeWord: ev.target.checked }));
+  stage.querySelector('#set-overlay-try')?.addEventListener('click', async () => {
+    await H.guard(() => nexa.overlay.show(), 'Opening the overlay');
+  });
 
   stage.querySelector('#set-model')?.addEventListener('change', async (ev) => {
     const updated = await H.guard(

@@ -53,8 +53,14 @@ async function makeDocx(target) {
 
   section('what this machine can do');
   ok('capabilities are reported without throwing', typeof caps.available === 'boolean');
-  if (!caps.available) {
-    console.log(`\n  SKIPPED: no converter installed. ${caps.why}`);
+  // Not `available`: NexaFiles renders Markdown, text and HTML itself, so on a
+  // machine with no office suite that flag is true while every format this suite
+  // exercises is still unconvertible. The question is whether an office suite is
+  // here. (Under plain Node there is no BrowserWindow either, so the built-in
+  // engine is absent too and this is simply "no converter at all".)
+  const officeEngine = (caps.engines || []).find((e) => e.id !== 'builtin');
+  if (!officeEngine) {
+    console.log(`\n  SKIPPED: no office suite installed. ${caps.why || ''}`);
     console.log(`\n  ${pass} passed, ${fail} failed (conversion suite skipped)`);
     process.exit(fail === 0 ? 0 : 1);
   }

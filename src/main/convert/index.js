@@ -27,6 +27,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const roots = require('../security/roots');
+const builtin = require('./builtin-pdf');
 
 const SCRIPT = path.join(__dirname, 'office-convert.ps1');
 
@@ -49,6 +50,23 @@ const LIBREOFFICE_CANDIDATES = [
   '/usr/bin/libreoffice',
   '/snap/bin/libreoffice',
 ];
+
+/**
+ * Electron's own window API, when this is running inside Electron.
+ *
+ * The built-in renderer prints a page through a BrowserWindow. Requiring
+ * `electron` from plain Node hands back the path to the binary rather than the
+ * module, so the shape of what came back is what decides whether the engine is
+ * really available — a truthiness check would report a working renderer inside
+ * the unit tests, where there is no browser at all.
+ */
+function electronApi() {
+  try {
+    const e = require('electron');
+    if (e && typeof e === 'object' && e.BrowserWindow) return e;
+  } catch { /* not running under Electron */ }
+  return null;
+}
 
 /** Runs a program without a shell, so no argument is ever re-parsed. */
 function run(file, args, { env = {}, timeout = TIMEOUT_MS } = {}) {
@@ -123,7 +141,23 @@ async function capabilities({ refresh = false } = {}) {
   if (excel) EXCEL.forEach((e) => from.add(e));
   if (libreOffice) [...WORD, ...POWERPOINT, ...EXCEL].forEach((e) => from.add(e));
 
+  // Formats Electron itself can lay out. These need no office suite and are
+  // never handed to one even when one is installed: LibreOffice opening a
+  // Markdown file treats it as unformatted plain text, headings and all, which
+  // is a worse PDF than the one this application can produce from the same
+  // bytes. Word is the reference renderer for .docx and nothing else here is.
+  const canRenderSelf = electronApi() ? [...builtin.FORMATS] : [];
+  canRenderSelf.forEach((e) => from.add(e));
+
   const engines = [];
+  if (canRenderSelf.length) {
+    engines.push({
+      id: 'builtin',
+      label: 'NexaFiles',
+      formats: canRenderSelf,
+      note: 'Text, Markdown, HTML, CSV and JSON are laid out and printed by NexaFiles itself.',
+    });
+  }
   if (word || powerpoint || excel) {
     engines.push({
       id: 'office',
@@ -139,14 +173,26 @@ async function capabilities({ refresh = false } = {}) {
   cached = {
     available: engines.length > 0,
     engines,
+    // Named separately from `canConvertFrom` because the interface has to be
+    // able to say *which* engine would run: "Word will export this" and
+    // "NexaFiles will render this" are different promises about fidelity.
+    selfRendered: canRenderSelf,
+    needsOfficeSuite: [...WORD, ...POWERPOINT, ...EXCEL]
+      .filter((e) => !canRenderSelf.includes(e))
+      .filter((e, i, a) => a.indexOf(e) === i)
+      .sort(),
     // Sorted so the interface can render a stable list rather than a set's order.
     canConvertFrom: [...from].sort(),
     to: engines.length ? ['pdf'] : [],
-    why: engines.length
-      ? null
-      : 'No document converter is installed. NexaFiles converts documents using Microsoft ' +
+    why: engines.length === 0
+      ? 'No document converter is installed. NexaFiles converts documents using Microsoft ' +
         'Office or LibreOffice, and neither was found on this machine. Installing either ' +
-        'one enables conversion; NexaFiles cannot bundle an office suite.',
+        'one enables conversion; NexaFiles cannot bundle an office suite.'
+      : (word || powerpoint || excel || libreOffice)
+        ? null
+        : 'Word, PowerPoint and Excel documents need Microsoft Office or LibreOffice, and ' +
+          'neither was found on this machine. Text, Markdown, HTML, CSV and JSON are ' +
+          'rendered by NexaFiles itself and need nothing installed.',
   };
   return cached;
 }
@@ -235,7 +281,12 @@ async function convert(sourcePath, { format = 'pdf', outDir = null, onConflict =
   }
 
   const started = Date.now();
-  const engine = caps.engines[0];
+  // The engine is chosen by what the file *is*, not by which one happens to be
+  // first in the list. A .docx goes to Office; a .md goes to the renderer that
+  // can actually read Markdown.
+  const engine = caps.engines.find((e) => e.id === 'builtin' && builtin.handles(ext))
+    || caps.engines.find((e) => e.id !== 'builtin')
+    || caps.engines[0];
 
   // Written to a temporary name first, then moved into place. A converter killed
   // half-way through would otherwise leave a truncated PDF sitting at the name of
@@ -246,7 +297,10 @@ async function convert(sourcePath, { format = 'pdf', outDir = null, onConflict =
   );
 
   try {
-    if (engine.id === 'office') {
+    if (engine.id === 'builtin') {
+      const { buffer } = await builtin.renderToPdf(electronApi(), src);
+      await fsp.writeFile(staging, buffer);
+    } else if (engine.id === 'office') {
       await run('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT,
       ], { env: { NEXA_SRC: src, NEXA_DST: staging } });

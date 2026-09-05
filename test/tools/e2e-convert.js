@@ -8,6 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow } = require('electron');
 
+const { mainWindow } = require('./main-window');
 let pass = 0, fail = 0;
 const out = [];
 function ok(name, cond, extra = '') {
@@ -26,7 +27,7 @@ setTimeout(() => {
 
 app.whenReady().then(() => {
   const tick = setInterval(async () => {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow(BrowserWindow);
     if (!win || win.webContents.isLoading()) return;
     clearInterval(tick);
     await new Promise((r) => setTimeout(r, 2000));
@@ -41,14 +42,30 @@ app.whenReady().then(() => {
       const support = await js(`window.nexa.convert.support()`);
       ok('the bridge reports conversion support', typeof support.available === 'boolean');
 
-      if (!support.available) {
-        ok('and explains why when nothing is installed', typeof support.why === 'string');
+      // Everything below this point drives a real office suite through COM, so
+      // it needs one to be installed. `available` is no longer the right question
+      // to ask: NexaFiles now renders text, Markdown and HTML itself, so on a
+      // machine with no office suite `available` is true and .docx is still not
+      // convertible. What this section needs is an engine that is not the
+      // built-in one — the built-in path is covered end to end in e2e-overlay.js.
+      const officeEngine = (support.engines || []).find((e) => e.id !== 'builtin');
+      if (!officeEngine) {
+        ok('the built-in renderer is offered when no office suite is installed',
+          (support.engines || []).some((e) => e.id === 'builtin'));
+        ok('Word formats are listed as needing one rather than silently missing',
+          (support.needsOfficeSuite || []).includes('docx'),
+          (support.needsOfficeSuite || []).join(','));
+        ok('and it is not offered as convertible here',
+          !support.canConvertFrom.includes('docx'));
+        ok('and the reason names the software that would enable it',
+          typeof support.why === 'string' && /Office|LibreOffice/i.test(support.why),
+          support.why);
         console.log(out.join('\n'));
-        console.log(`\n  ${pass} passed, ${fail} failed (no converter on this machine)`);
+        console.log(`\n  ${pass} passed, ${fail} failed (no office suite on this machine)`);
         return app.exit(fail === 0 ? 0 : 1);
       }
 
-      ok('an engine is named', !!support.engines[0].label, support.engines[0].label);
+      ok('an engine is named', !!officeEngine.label, officeEngine.label);
       ok('docx is convertible here', support.canConvertFrom.includes('docx'));
 
       // A real .docx, made by the same Word this feature drives.

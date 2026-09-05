@@ -7,6 +7,7 @@
 const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow } = require('electron');
+const { mainWindow } = require('./main-window');
 const { DEFAULT_MODEL } = require(path.join(__dirname, '..', '..', 'src', 'main', 'llm', 'gemini.js'));
 
 let pass = 0, fail = 0;
@@ -25,7 +26,7 @@ setTimeout(() => {
 
 app.whenReady().then(() => {
   const tick = setInterval(async () => {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow(BrowserWindow);
     if (!win || win.webContents.isLoading()) return;
     clearInterval(tick);
     await new Promise((r) => setTimeout(r, 2000));

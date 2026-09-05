@@ -1,0 +1,547 @@
+/* The overlay panel.
+ *
+ * One rule shapes all of this: the panel is a single object that changes shape,
+ * never a sequence of dialogs. Listening becomes searching becomes a list of
+ * files becomes a finished PDF, and at no point does anything appear, disappear,
+ * or jump — the card grows, the contents cross-fade, and the window is resized
+ * underneath to match. Everything below exists to make that one impression hold.
+ *
+ * The colour is deliberately not the application's porcelain-and-ultramarine.
+ * This is a panel that floats over other people's software, and it has to read
+ * as NexaFiles at a glance, from the corner of an eye, on top of anything. So it
+ * carries its own light: an aura built from the application's own pigment ramp,
+ * turning slowly, brighter while it is working.
+ */
+
+/* The angle the aura is rotated to. Registered as a real custom property so it
+ * can be animated — a plain `--angle` in a gradient is a string, and strings do
+ * not interpolate, so the ring would jump rather than turn. */
+@property --aura-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+:root {
+  /* The pigment ramp, from the main stylesheet, plus the two it does not have.
+   * These are the aura, and they are the only saturated colour in the panel. */
+  --a-1: #6C4BFF;   /* violet     */
+  --a-2: #2C3FCB;   /* ultramarine — the application's primary */
+  --a-3: #0F8A7E;   /* viridian   */
+  --a-4: #C9A227;   /* ochre      */
+  --a-5: #E0457B;   /* rose       */
+  --a-6: #9B2D8F;   /* plum       */
+
+  --glass:       rgba(252, 253, 255, 0.86);
+  --glass-line:  rgba(20, 26, 46, 0.10);
+  --ink:         #141A2E;
+  --ink-2:       #48536A;
+  --ink-3:       #7C8798;
+  --hover:       rgba(20, 26, 46, 0.05);
+  --sunk:        rgba(20, 26, 46, 0.045);
+  --shadow:      0 24px 60px rgba(12, 16, 32, 0.26), 0 3px 12px rgba(12, 16, 32, 0.14);
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root[data-theme="dark"] {
+  --glass:       rgba(20, 24, 36, 0.88);
+  --glass-line:  rgba(255, 255, 255, 0.11);
+  --ink:         #EEF1F6;
+  --ink-2:       #AEB8C9;
+  --ink-3:       #7C8798;
+  --hover:       rgba(255, 255, 255, 0.07);
+  --sunk:        rgba(255, 255, 255, 0.055);
+  --shadow:      0 24px 64px rgba(0, 0, 0, 0.55), 0 3px 12px rgba(0, 0, 0, 0.4);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  /* The window itself is transparent; only the card is painted. */
+  background: transparent;
+  overflow: hidden;
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink);
+  /* The panel is a floating control surface: dragging a selection across it is
+   * never what anyone meant. The one exception is the text field. */
+  user-select: none;
+  cursor: default;
+}
+
+.stage {
+  position: relative;
+  height: 100%;
+  /* Matches GUTTER in overlay.js. The glow lives in this margin. */
+  padding: 28px;
+}
+
+/* ── the aura ──────────────────────────────────────────────────────────────
+ * A conic gradient, blurred hard, sitting behind the card and turning. It is
+ * the whole personality of the panel, so it is also the thing most carefully
+ * bounded: it never animates faster than the eye can rest on, and it stops
+ * entirely for anyone who has asked for less motion. */
+
+.aura {
+  position: absolute;
+  inset: 16px;
+  border-radius: 30px;
+  background: conic-gradient(from var(--aura-angle),
+    var(--a-1), var(--a-2), var(--a-3), var(--a-4), var(--a-5), var(--a-6), var(--a-1));
+  filter: blur(22px);
+  opacity: 0.42;
+  animation: aura-turn 14s linear infinite;
+  transition: opacity 600ms var(--ease), filter 600ms var(--ease);
+  will-change: filter, opacity;
+}
+
+/* Brighter and tighter while the panel is doing something, so the state of the
+ * work is legible from the light alone, before a word is read. */
+body[data-busy="true"] .aura {
+  opacity: 0.72;
+  filter: blur(16px);
+  animation-duration: 5s;
+}
+
+body[data-busy="listening"] .aura {
+  opacity: 0.66;
+  filter: blur(18px);
+  animation-duration: 8s;
+}
+
+@keyframes aura-turn {
+  to { --aura-angle: 360deg; }
+}
+
+/* ── the card ─────────────────────────────────────────────────────────────── */
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-radius: 22px;
+  background: var(--glass);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  /* The morph. Height is set in JavaScript from the measured content; this is
+   * what turns that number into a movement. */
+  height: 132px;
+  transition: height 420ms var(--ease);
+  will-change: height;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 14px 12px 12px 15px;
+  flex: 0 0 auto;
+  /* The whole head is the drag handle on platforms where the panel can move. */
+  -webkit-app-region: no-drag;
+}
+
+.head-text { flex: 1; min-width: 0; }
+
+.head-title {
+  font-size: 13px;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.head-sub {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.35;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The subtitle is where the live commentary goes, so it changes often. Fading
+ * each new one in stops the line flickering as counts tick upward. */
+.head-sub.shift { animation: sub-in 260ms var(--ease); }
+@keyframes sub-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.ghost-btn {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 7px;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: background 140ms, color 140ms;
+}
+.ghost-btn:hover { background: var(--hover); color: var(--ink); }
+
+/* ── the orb ───────────────────────────────────────────────────────────────
+ * The listening indicator. It scales with `--level`, which is written from the
+ * microphone's actual loudness — not an animation. A ring that moved whether or
+ * not anything was being heard would be the one part of this panel that lied. */
+
+.orb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+}
+
+.orb-core {
+  width: 15px; height: 15px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 28%, #fff8, transparent 55%),
+    conic-gradient(from var(--aura-angle), var(--a-1), var(--a-3), var(--a-4), var(--a-5), var(--a-1));
+  animation: aura-turn 6s linear infinite;
+  box-shadow: 0 0 10px rgba(108, 75, 255, 0.5);
+  transform: scale(calc(1 + var(--level, 0) * 0.42));
+  transition: transform 80ms linear;
+}
+
+.orb-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--a-1);
+  opacity: 0;
+}
+
+body[data-busy="listening"] .orb-ring {
+  animation: orb-pulse 1.9s var(--ease) infinite;
+}
+
+@keyframes orb-pulse {
+  0%   { opacity: 0.55; transform: scale(0.7); }
+  70%  { opacity: 0;    transform: scale(1.25); }
+  100% { opacity: 0;    transform: scale(1.25); }
+}
+
+/* ── the body ─────────────────────────────────────────────────────────────── */
+
+.card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 15px 2px;
+  /* Hidden by default, and switched to scrolling only when the card has been
+   * clamped at its maximum — see desiredHeight() in overlay.js. */
+  overflow: hidden;
+  scrollbar-width: thin;
+}
+.card-body.scrolls { overflow-y: auto; overflow-x: hidden; }
+.card-body::-webkit-scrollbar { width: 7px; }
+.card-body::-webkit-scrollbar-thumb {
+  background: var(--hover); border-radius: 4px;
+}
+
+/* Each new state fades up rather than replacing in place, which is what makes
+ * the change read as one panel thinking rather than two panels swapping. */
+/* `flow-root` rather than a plain block, and it is load-bearing rather than
+ * tidiness: without it the last child's bottom margin collapses out through the
+ * top of this box, the measured height comes back a dozen pixels short, and the
+ * card is drawn just too small to show its own buttons. */
+.view {
+  display: flow-root;
+  animation: view-in 300ms var(--ease);
+}
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.say {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+  margin: 2px 0 12px;
+  user-select: text;
+  cursor: text;
+}
+.say.quiet { color: var(--ink-2); font-size: 12.5px; }
+
+.heard {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-2);
+  font-style: italic;
+  margin: 0 0 10px;
+  padding-left: 9px;
+  border-left: 2px solid var(--a-1);
+}
+
+/* ── the live waveform ─────────────────────────────────────────────────────
+ * Five bars, each reading the same measured level with a different weight, so
+ * the shape moves like a voice rather than like a progress bar. */
+
+.wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 30px;
+  margin: 6px 0 4px;
+}
+.wave i {
+  display: block;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--a-1), var(--a-3));
+  height: calc(4px + var(--level, 0) * var(--w, 1) * 26px);
+  transition: height 70ms linear;
+}
+.wave i:nth-child(1) { --w: 0.45; }
+.wave i:nth-child(2) { --w: 0.78; }
+.wave i:nth-child(3) { --w: 1;    }
+.wave i:nth-child(4) { --w: 0.72; }
+.wave i:nth-child(5) { --w: 0.4;  }
+
+/* The shimmer under a line of text while work is happening. */
+.working {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--ink-2);
+  margin: 4px 0 12px;
+}
+.working .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--a-1);
+  animation: dot-breathe 1.2s ease-in-out infinite;
+}
+@keyframes dot-breathe {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  50%      { opacity: 1;    transform: scale(1.15); }
+}
+
+/* ── the file list ────────────────────────────────────────────────────────── */
+
+.choice-q {
+  font-size: 13px; font-weight: 560; line-height: 1.45;
+  margin: 2px 0 10px;
+}
+
+.files { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+
+.file {
+  display: flex; align-items: flex-start; gap: 10px;
+  width: 100%; text-align: left;
+  padding: 9px 10px;
+  border: 1px solid var(--glass-line);
+  border-radius: 11px;
+  background: var(--sunk);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 160ms, background 160ms, transform 160ms var(--ease);
+}
+.file:hover {
+  background: var(--hover);
+  border-color: var(--a-1);
+  transform: translateX(2px);
+}
+.file:active { transform: translateX(2px) scale(0.995); }
+
+.file-mark {
+  flex: 0 0 auto;
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  background: linear-gradient(140deg, var(--a-2), var(--a-1));
+  color: #fff;
+  font-size: 8.5px; font-weight: 700; letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.file-text { min-width: 0; flex: 1; }
+
+.file-name {
+  font-size: 12.5px; font-weight: 560;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.file-meta {
+  font-size: 11px; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+/* The passage that matched, quoted from the file itself. The marks around the
+ * matched words come from SQLite's own snippet(), not from a highlight guess. */
+.file-snip {
+  font-size: 11px; line-height: 1.45; color: var(--ink-2);
+  margin-top: 4px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.file-snip mark {
+  background: rgba(108, 75, 255, 0.16);
+  color: inherit; border-radius: 2px; padding: 0 1px;
+  font-weight: 600;
+}
+
+/* ── the proposal and its result ──────────────────────────────────────────── */
+
+.slip {
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  background: var(--sunk);
+  padding: 10px 11px;
+  margin-bottom: 11px;
+}
+
+.slip-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+.slip-row + .slip-row { margin-top: 7px; }
+
+.slip-name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-weight: 560;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* The destination is truncated from the *left*.
+ *
+ * A conversion's target is its source with a different extension, so the two
+ * names share a long prefix and differ only at the end — and truncating both at
+ * the end produces two identical-looking strings that hide the one part the user
+ * is being asked to approve: whether it lands as "notes.pdf" or "notes (2).pdf". */
+.slip-name.to {
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: plaintext;
+}
+
+.slip-arrow { color: var(--ink-3); flex: 0 0 auto; }
+
+.tag {
+  flex: 0 0 auto;
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px; border-radius: 5px;
+  background: var(--hover); color: var(--ink-2);
+}
+.tag.done { background: rgba(15, 138, 126, 0.16); color: #0F8A7E; }
+.tag.new  { background: linear-gradient(140deg, var(--a-2), var(--a-1)); color: #fff; }
+
+.note {
+  font-size: 11px; line-height: 1.45; color: var(--ink-3);
+  margin: -4px 0 11px;
+}
+
+.actions { display: flex; gap: 7px; margin-bottom: 12px; flex-wrap: wrap; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--glass-line);
+  background: var(--sunk);
+  color: var(--ink);
+  font: inherit; font-size: 12px; font-weight: 560;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms, transform 120ms var(--ease);
+}
+.btn:hover { background: var(--hover); }
+.btn:active { transform: scale(0.975); }
+
+.btn.primary {
+  background: linear-gradient(135deg, var(--a-2), var(--a-1));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(60, 60, 200, 0.32);
+}
+.btn.primary:hover { filter: brightness(1.07); }
+.btn:disabled { opacity: 0.5; cursor: default; transform: none; }
+
+/* ── the composer ─────────────────────────────────────────────────────────── */
+
+.composer {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 7px;
+  padding: 9px 11px 11px;
+  border-top: 1px solid var(--glass-line);
+}
+
+.ask-input {
+  flex: 1; min-width: 0;
+  border: 1px solid var(--glass-line);
+  border-radius: 9px;
+  background: var(--sunk);
+  color: var(--ink);
+  font: inherit; font-size: 12.5px;
+  padding: 7px 10px;
+  outline: none;
+  user-select: text;
+  transition: border-color 160ms, background 160ms;
+}
+.ask-input::placeholder { color: var(--ink-3); }
+.ask-input:focus {
+  border-color: var(--a-1);
+  background: transparent;
+}
+
+.mic-btn, .send-btn {
+  flex: 0 0 auto;
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border: 1px solid var(--glass-line);
+  border-radius: 9px;
+  background: var(--sunk);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 150ms, color 150ms, border-color 150ms, transform 120ms var(--ease);
+}
+.mic-btn:hover, .send-btn:hover { background: var(--hover); color: var(--ink); }
+.mic-btn:active, .send-btn:active { transform: scale(0.94); }
+.mic-btn:disabled, .send-btn:disabled { opacity: 0.42; cursor: default; }
+
+/* Recording: the button becomes the thing you press to stop. */
+.mic-btn.live {
+  background: linear-gradient(135deg, var(--a-5), var(--a-1));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 0 0 0 rgba(224, 69, 123, 0.45);
+  animation: mic-live 1.8s ease-out infinite;
+}
+@keyframes mic-live {
+  0%   { box-shadow: 0 0 0 0 rgba(224, 69, 123, 0.42); }
+  70%  { box-shadow: 0 0 0 9px rgba(224, 69, 123, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(224, 69, 123, 0); }
+}
+
+.trouble {
+  font-size: 12px; line-height: 1.45;
+  color: #C21D3E;
+  margin: 2px 0 12px;
+}
+:root[data-theme="dark"] .trouble { color: #FF8FA6; }
+
+.hint {
+  font-size: 11px; color: var(--ink-3);
+  margin: 0 0 10px;
+}
+kbd {
+  font: inherit; font-size: 10px;
+  padding: 1px 5px; border-radius: 4px;
+  border: 1px solid var(--glass-line);
+  background: var(--sunk);
+}
+
+/* Anyone who has asked their system for less movement gets a panel that still
+ * changes state and still reports everything — it simply stops moving. */
+@media (prefers-reduced-motion: reduce) {
+  .aura, .orb-core, .orb-ring, .mic-btn.live, .working .dot { animation: none; }
+  .card { transition: none; }
+  .view { animation: none; }
+  .wave i { transition: none; }
+}

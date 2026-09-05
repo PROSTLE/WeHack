@@ -14,8 +14,9 @@ const { app, BrowserWindow, Menu, shell, session, nativeImage, dialog, nativeThe
 const roots = require('./src/main/security/roots');
 const { AppState } = require('./src/main/app-state');
 const { register } = require('./src/main/ipc');
-const { Agent } = require('./src/main/llm/agent');
+const { Agent, OVERLAY_INSTRUCTION } = require('./src/main/llm/agent');
 const agentTools = require('./src/main/llm/tools');
+const overlay = require('./src/main/overlay');
 
 let mainWindow = null;
 let state = null;
@@ -96,7 +97,12 @@ function createWindow() {
     // nothing-else request qualifies.
     return Array.isArray(types) && types.length > 0 && types.every((t) => t === 'audio');
   };
-  const isOwnWindow = (wc) => !!mainWindow && !mainWindow.isDestroyed() && wc === mainWindow.webContents;
+  // The overlay is one of ours as much as the main window is: it is the panel
+  // the microphone button now mostly lives in, and refusing it would leave the
+  // feature working only in the window the user was not looking at.
+  const isOwnWindow = (wc) =>
+    (!!mainWindow && !mainWindow.isDestroyed() && wc === mainWindow.webContents)
+    || overlay.isOverlayContents(wc);
 
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
     if (permission === 'media' && isOwnWindow(wc) && audioOnly(details)) {
@@ -139,7 +145,16 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    // `window-all-closed` no longer fires once the overlay exists: it is a
+    // window, it is hidden rather than closed, and it keeps the count above
+    // zero forever. Closing the visible window is still the user asking to
+    // quit, and without this the application would go on running with nothing
+    // on screen and no tray icon to close it from — the exact windowless
+    // process `reportFatal` exists to prevent.
+    if (process.platform !== 'darwin') app.quit();
+  });
 }
 
 /**
@@ -167,6 +182,35 @@ ${app.getPath('userData')}
     );
   } catch { /* dialog unavailable; the console message is all we have */ }
   app.exit(1);
+}
+
+/**
+ * Brings up the overlay and binds its summoning key.
+ *
+ * The window is created now rather than on first use: a panel that has to boot a
+ * renderer before it can appear would take a second to answer a keystroke, and
+ * the whole point of it is that it is there the instant it is asked for. It
+ * stays hidden until then and costs one idle renderer.
+ *
+ * A hotkey another application already owns cannot be claimed, and that is
+ * reported rather than swallowed — a shortcut that silently does nothing is
+ * indistinguishable from a feature that does not work.
+ */
+function startOverlay() {
+  const prefs = state.settings.values.overlay || {};
+  if (!prefs.enabled) {
+    console.log('[nexafiles] overlay disabled in settings.');
+    return;
+  }
+
+  overlay.create();
+  const bound = overlay.registerHotkey(prefs.hotkey, () => overlay.toggle());
+  if (bound.ok) {
+    console.log(`[nexafiles] overlay ready. Press ${bound.hotkey} anywhere to open it.`);
+  } else {
+    console.warn(`[nexafiles] ${bound.why}`);
+  }
+  return bound;
 }
 
 app.whenReady().then(async () => {
@@ -206,7 +250,28 @@ app.whenReady().then(async () => {
   state.agent = new Agent({
     gemini: state.gemini,
     tools: agentTools.build(state, { app, nativeImage }),
+    label: 'panel',
   });
+
+  // The overlay's agent. Same tools, same gate, its own conversation and its own
+  // instruction — the panel is for considered answers and the overlay is for one
+  // thing done now, and one instruction cannot be good at both. Its tools carry
+  // a progress hook so the panel can say "reading your documents" while it is.
+  state.overlayAgent = new Agent({
+    gemini: state.gemini,
+    systemInstruction: OVERLAY_INSTRUCTION,
+    label: 'overlay',
+    tools: agentTools.build(state, {
+      app,
+      nativeImage,
+      onStage: (payload) => {
+        const win = overlay.get();
+        if (win) win.webContents.send('overlay:stage', payload);
+      },
+    }),
+  });
+
+  startOverlay();
 
   const keyStatus = state.gemini.status();
   console.log(
@@ -226,10 +291,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
 app.on('before-quit', () => {
   state?.close();
+  // A global shortcut outlives the window that registered it. Releasing it here
+  // is what stops a killed instance from holding the key hostage for the next one.
+  overlay.destroy();
 });
+
+app.on('will-quit', () => overlay.unregisterHotkey());

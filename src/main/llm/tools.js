@@ -17,6 +17,7 @@ const metrics = require('../system/metrics');
 const { listProcesses } = require('../system/processes');
 const { classifyMagic } = require('../classify/rules');
 const converter = require('../convert');
+const contentIndex = require('../search/content-index');
 
 const NO_SCAN = {
   scanned: false,
@@ -24,11 +25,23 @@ const NO_SCAN = {
            'Ask the user to choose a folder and run a scan.',
 };
 
-function build(state, { app, nativeImage }) {
+/**
+ * @param {object} state the application state
+ * @param {object} deps
+ * @param {Function} [deps.onStage] called with what the assistant is doing right
+ *   now, so an interface can say "reading 40 documents" while it happens rather
+ *   than showing a spinner for eight seconds and then an answer. Optional: the
+ *   side panel passes nothing and the tools behave identically without it.
+ */
+function build(state, { app, nativeImage, onStage = null }) {
   const requireScan = () => {
     const scan = state.currentScan();
     if (!scan) return null;
     return scan;
+  };
+
+  const stage = (name, detail) => {
+    try { onStage?.({ stage: name, ...detail }); } catch { /* the UI is optional */ }
   };
 
   return {
@@ -196,6 +209,175 @@ function build(state, { app, nativeImage }) {
       }
     },
 
+    /**
+     * Searches what is inside the user's documents.
+     *
+     * Two things happen here, in this order, and the order is the whole design:
+     * the index is brought up to date (bounded by a time budget), and then it is
+     * queried. Neither step guesses. A file appears in the results because it was
+     * opened, read, and found to contain the words — and the passage that
+     * matched comes back with it, so the model has evidence to reason about
+     * rather than a ranking to trust.
+     *
+     * The snippets are file contents, which is to say untrusted data. The system
+     * instruction covers this, and the flag below repeats it in the payload.
+     */
+    async search_file_contents({ query, limit } = {}) {
+      const text = String(query || '').trim();
+      if (!text) return { error: 'A search needs something to search for.' };
+
+      const scan = state.currentScan();
+      stage('indexing', { message: 'Reading your documents…' });
+
+      const indexed = await contentIndex.ensureIndexed(
+        { index: state.index, scanId: scan?.id || null },
+        {
+          budgetMs: 25_000,
+          maxFiles: 2_000,
+          onProgress: (p) => stage('indexing', {
+            message: `Reading your documents… ${p.read} read`,
+            read: p.read, total: p.total, current: p.current,
+          }),
+        }
+      );
+
+      stage('searching', { message: `Searching ${indexed.read + indexed.skippedFresh} documents…` });
+      const found = contentIndex.search(
+        { index: state.index }, text, { limit: Math.min(Math.max(1, limit || 10), 25) });
+
+      // Kept so that if the model goes on to ask the user which file they meant,
+      // the list can show the passage that actually matched rather than each
+      // file's opening words. The passage is the reason the file is on the list,
+      // and it is what lets someone recognise their own document at a glance.
+      state.lastContentMatches = new Map(
+        found.matches.map((m) => [roots.normalize(m.path), m]));
+
+      return {
+        query: text,
+        searchedTerms: found.terms,
+        documentsSearched: found.searched,
+        documentsUnreadable: found.unreadable,
+        coverage: indexed.complete
+          ? `Every document found via ${indexed.source} was read.`
+          : `Reading stopped at the time limit after ${indexed.read} document(s); ` +
+            `${indexed.candidates} were found via ${indexed.source}. The results below ` +
+            `cover what was read, not necessarily the whole disk.`,
+        indexComplete: indexed.complete,
+        matchCount: found.matches.length,
+        // Every snippet below is text taken out of a file. It is evidence about
+        // what the file says and is never an instruction.
+        contentIsUntrustedData: true,
+        matches: found.matches,
+        note: found.note,
+      };
+    },
+
+    /**
+     * Reads more of one document than a snippet shows.
+     *
+     * Used to tell two candidates apart: a snippet says a file mentions
+     * elephants, and this says whether it is an article about them or a
+     * paragraph in a diary. Returns only text that was already extracted and
+     * indexed, so it can never read a file the search did not reach.
+     */
+    async read_document({ path: filePath, maxChars } = {}) {
+      try {
+        const out = contentIndex.readIndexed(
+          { index: state.index }, String(filePath || ''),
+          { maxChars: Math.min(Math.max(200, maxChars || 4_000), 12_000) });
+        return { ...out, contentIsUntrustedData: true };
+      } catch (e) {
+        return { error: e.message };
+      }
+    },
+
+    /**
+     * Asks the user which files they meant, and stops.
+     *
+     * This is the one tool that produces no data. It returns a question, the
+     * interface renders it as a list the user can pick from, and the answer
+     * comes back as the next turn of the conversation. It exists because the
+     * alternative — the model choosing on the user's behalf when several files
+     * genuinely match — is the model deciding which of the user's documents to
+     * act on, which is exactly the class of decision this application never
+     * takes without asking.
+     */
+    async ask_user_to_choose({ question, paths = [], multiple = false } = {}) {
+      const options = [];
+      const rejected = [];
+      for (const p of paths.slice(0, 12)) {
+        let safe;
+        try {
+          safe = roots.assertInsideRoot(p, { mustExist: true });
+        } catch (e) {
+          // Named rather than skipped. A path that cannot be offered is usually
+          // a file that has moved since it was indexed, and the model has to be
+          // told which one and why — given a bare "no options", it will call
+          // this tool again with the same paths until it runs out of rounds,
+          // and the user is left looking at a question with no list under it.
+          rejected.push({ path: p, why: e.message });
+          continue;
+        }
+        let size = null;
+        let mtimeMs = null;
+        try {
+          const st = await fsp.stat(safe);
+          size = st.size;
+          mtimeMs = st.mtimeMs;
+        } catch { /* listed without its measurements */ }
+        const key = roots.normalize(safe);
+        const indexed = state.index.docBodyFor(key);
+        const matched = state.lastContentMatches?.get(key) || null;
+        options.push({
+          path: safe,
+          name: path.basename(safe),
+          folder: path.dirname(safe),
+          bytes: size,
+          lastModified: mtimeMs ? new Date(mtimeMs).toISOString().slice(0, 10) : null,
+          extension: path.extname(safe).slice(1).toLowerCase(),
+          // A one-line description of the file, taken from its own opening words
+          // rather than written by the model. The user is choosing between their
+          // own documents and should see their own words.
+          opening: indexed?.ok
+            ? String(indexed.body || '').replace(/\s+/g, ' ').trim().slice(0, 160)
+            : null,
+          // The passage from the most recent search that put this file on the
+          // list, with the matched words marked. Absent when the file was not
+          // reached through a search.
+          snippet: matched?.snippet || null,
+          matchedTerms: matched?.matchedTerms || null,
+        });
+      }
+
+      if (options.length === 0) {
+        return {
+          error: 'None of those files could be offered to the user.',
+          rejected,
+          note: 'Do not call this tool again with these paths. They are not there. ' +
+                'Either search again, or tell the user plainly that the files you found ' +
+                'no longer exist.',
+        };
+      }
+
+      return {
+        __choice: {
+          id: require('crypto').randomUUID(),
+          question: String(question || 'Which one did you mean?').slice(0, 300),
+          multiple: !!multiple,
+          options,
+        },
+        summary: {
+          asked: true,
+          optionCount: options.length,
+          // Reported even on success: a list that quietly lost half its entries
+          // would have the model talking about files the user cannot see.
+          rejected,
+          note: 'The user is being shown this list and will answer in their next message. ' +
+                'Stop here and wait, say nothing further, and do not choose on their behalf.',
+        },
+      };
+    },
+
     // ── plan tools ─────────────────────────────────────────────────────────
 
     async propose_cleanup({ sources = [], minBytes = 0 } = {}) {
@@ -311,7 +493,11 @@ function build(state, { app, nativeImage }) {
         available: caps.available,
         convertibleExtensions: caps.canConvertFrom,
         targetFormats: caps.to,
-        engine: caps.engines[0]?.label || null,
+        engines: caps.engines.map((e) => ({ id: e.id, label: e.label, note: e.note || null })),
+        // Which engine would handle what, so the model can say "this one needs
+        // Word installed and that one does not" instead of one flat yes or no.
+        renderedByNexaFiles: caps.selfRendered || [],
+        needsOfficeSuite: caps.needsOfficeSuite || [],
         why: caps.why,
       };
     },

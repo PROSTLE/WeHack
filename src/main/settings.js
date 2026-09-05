@@ -17,6 +17,14 @@ const fs = require('fs');
 const path = require('path');
 
 const THEMES = ['system', 'light', 'dark'];
+
+// The overlay's summoning key. Validated as a shape rather than against a list
+// of every possible chord: Electron is the authority on whether an accelerator
+// can actually be registered, and it reports that at registration time. What is
+// checked here is that the string is an accelerator at all, so a corrupt
+// settings file cannot make startup throw.
+const HOTKEY_PATTERN = /^(?:(?:Command|Cmd|Control|Ctrl|CommandOrControl|CmdOrCtrl|Alt|Option|AltGr|Shift|Super|Meta)\+)*[A-Za-z0-9]{1,12}$/;
+const DEFAULT_HOTKEY = process.platform === 'darwin' ? 'Alt+Space' : 'Control+Alt+Space';
 const LAYOUTS = ['details', 'list', 'tiles', 'icons'];
 const SORT_KEYS = ['name', 'mtimeMs', 'typeLabel', 'size'];
 
@@ -32,6 +40,21 @@ function defaults() {
       showHidden: false,
       sortKey: 'name',
       sortDir: 1,
+    },
+    overlay: {
+      enabled: true,
+      hotkey: DEFAULT_HOTKEY,
+      // Whether pressing the key opens the microphone as well as the panel.
+      // On by default because the panel exists to be spoken to, and off is one
+      // click away for someone who would rather type.
+      listenOnOpen: true,
+      // Whether the panel closes when it loses focus. Off would leave a floating
+      // window over everything until dismissed, which some people prefer.
+      hideOnBlur: true,
+      // "Hey Nexa". Off by default, and it is the only setting in this file that
+      // holds a microphone open — see src/renderer/js/wake.js for exactly what
+      // is analysed here and what is sent away to be checked.
+      wakeWord: false,
     },
   };
 }
@@ -51,6 +74,7 @@ function sanitise(raw, base = defaults()) {
     ...base,
     assistant: { ...defaults().assistant, ...(base.assistant || {}) },
     files: { ...defaults().files, ...(base.files || {}) },
+    overlay: { ...defaults().overlay, ...(base.overlay || {}) },
   };
   if (!raw || typeof raw !== 'object') return out;
 
@@ -74,6 +98,18 @@ function sanitise(raw, base = defaults()) {
         .slice(0, 8);
     }
   }
+
+  const o = raw.overlay;
+  if (o && typeof o === 'object') {
+    if (typeof o.enabled === 'boolean') out.overlay.enabled = o.enabled;
+    if (typeof o.listenOnOpen === 'boolean') out.overlay.listenOnOpen = o.listenOnOpen;
+    if (typeof o.hideOnBlur === 'boolean') out.overlay.hideOnBlur = o.hideOnBlur;
+    if (typeof o.wakeWord === 'boolean') out.overlay.wakeWord = o.wakeWord;
+    if (typeof o.hotkey === 'string' && HOTKEY_PATTERN.test(o.hotkey.trim())) {
+      out.overlay.hotkey = o.hotkey.trim();
+    }
+  }
+  if (!HOTKEY_PATTERN.test(out.overlay.hotkey || '')) out.overlay.hotkey = DEFAULT_HOTKEY;
 
   const f = raw.files;
   if (f && typeof f === 'object') {
@@ -123,6 +159,7 @@ class Settings {
     return {
       theme: this.values.theme,
       files: { ...this.values.files },
+      overlay: { ...this.values.overlay },
       assistant: {
         model: this.values.assistant.model,
         keyCount: keys.length,

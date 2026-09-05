@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const { app, BrowserWindow } = require('electron');
 
+const { mainWindow } = require('./main-window');
 const logs = [];
 app.on('browser-window-created', (_e, win) => {
   win.webContents.on('console-message', (e) => {
@@ -19,7 +20,7 @@ const TARGET = process.argv[2] || path.join(os.homedir(), 'Documents');
 
 app.whenReady().then(() => {
   const tick = setInterval(async () => {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow(BrowserWindow);
     if (!win || win.webContents.isLoading()) return;
     clearInterval(tick);
     await new Promise((r) => setTimeout(r, 1500));

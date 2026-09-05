@@ -1,5 +1,6 @@
 const path = require('path');
 const { app, BrowserWindow } = require('electron');
+const { mainWindow } = require('./main-window');
 const marks = [];
 const t0 = Date.now();
 const mark = (m) => { marks.push(`${String(Date.now()-t0).padStart(6)}ms  ${m}`); };
@@ -18,7 +19,7 @@ app.on('browser-window-created', (_e, win) => {
 require(path.join(__dirname, '..', '..', 'main.js'));
 
 setTimeout(() => {
-  const w = BrowserWindow.getAllWindows()[0];
+  const w = mainWindow(BrowserWindow);
   mark('--- after 8s ---');
   if (!w) { mark('NO WINDOW OBJECT'); }
   else {

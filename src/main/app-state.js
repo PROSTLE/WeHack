@@ -39,6 +39,17 @@ class AppState {
     // was shown, not whatever a later message claims was agreed.
     this.conversions = new Map();
 
+    // Open "which of these did you mean" questions from the overlay, keyed by
+    // id. They live here for the same reason conversions do: when the answer
+    // comes back, the paths it names are checked against the ones that were
+    // actually offered, rather than believed.
+    this.overlayChoices = new Map();
+
+    // The passages the most recent content search matched on, keyed by path.
+    // Held so that a follow-up "which of these did you mean" can show the user
+    // the sentence that put each file on the list.
+    this.lastContentMatches = new Map();
+
     // Most recent scanner outputs, so the UI and the agent share one result set.
     this.lastDuplicates = { exact: null, image: null, text: null, video: null };
     this.lastLeftovers = null;
@@ -67,7 +78,8 @@ class AppState {
     }
     if (saved.model) this.gemini.setModel(saved.model);
 
-    this.agent = null;   // built once tools are registered
+    this.agent = null;         // the side panel's, built once tools are registered
+    this.overlayAgent = null;  // the overlay's, with its own history and instruction
 
     // Records CPU and memory for the current boot session. Started in init().
     this.session = null;

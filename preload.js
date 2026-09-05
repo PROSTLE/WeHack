@@ -127,6 +127,10 @@ contextBridge.exposeInMainWorld('nexa', {
     get: () => call('settings:get'),
     set: (patch) => call('settings:set', patch),
     onThemeChange: (h) => on('theme:changed', h),
+    // Every window is told when preferences change, so a switch thrown in the
+    // main window's Settings takes effect in the overlay now rather than at the
+    // next launch.
+    onChanged: (h) => on('settings:changed', h),
   },
 
   system: {
@@ -162,6 +166,46 @@ contextBridge.exposeInMainWorld('nexa', {
     restore: (id) => call('quarantine:restore', id),
     forget: (id) => call('quarantine:forget', id),
     audit: () => call('quarantine:audit'),
+  },
+
+  // The overlay panel. It is a second window over the same main process, so it
+  // reaches the same tools through the same envelope — nothing here is a power
+  // the side panel does not also have.
+  overlay: {
+    // Asks the assistant. Distinct from `agent.send` because the overlay keeps
+    // its own conversation: a question asked over another application must not
+    // appear in the panel's transcript, and vice versa.
+    ask: (message) => call('overlay:ask', message),
+    // The user's answer to an ask_user_to_choose question, by proposal id. The
+    // paths are re-validated in the main process against the offered set.
+    choose: (choiceId, paths) => call('overlay:choose', choiceId, paths || []),
+    // Executes a conversion the assistant proposed and the user just approved.
+    convert: (conversionId, opts) => call('overlay:convert', conversionId, opts || {}),
+    // Offers a native Save dialog for a file the conversion produced.
+    saveCopy: (filePath) => call('overlay:saveCopy', filePath),
+    reveal: (filePath) => call('overlay:reveal', filePath),
+    open: (filePath) => call('overlay:open', filePath),
+    reset: () => call('overlay:reset'),
+    status: () => call('overlay:status'),
+    // Raises the panel from the main window — the "Show it" button in Settings,
+    // for someone whose chosen chord turned out to be taken.
+    show: () => call('overlay:show'),
+    // The renderer announcing it is bound. Answers with whether the panel is
+    // already on screen, so a summon that arrived too early is not lost.
+    ready: () => call('overlay:ready'),
+    // Raised because the wake phrase was heard. Separate from `show` so the
+    // panel knows to arm the microphone whatever the "listen on open" setting
+    // says — the user has just spoken to it.
+    showFromWake: () => call('overlay:showFromWake'),
+    // The renderer measures its own card and asks for a window that fits it.
+    resize: (height, opts) => call('overlay:resize', height, opts || {}),
+    hide: () => call('overlay:hide'),
+    // Progress while a question is being answered, so the panel can say what it
+    // is doing rather than spinning.
+    onStage: (h) => on('overlay:stage', h),
+    onShown: (h) => on('overlay:shown', h),
+    onHidden: (h) => on('overlay:hidden', h),
+    onBlurred: (h) => on('overlay:blurred', h),
   },
 
   agent: {

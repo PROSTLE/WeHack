@@ -29,6 +29,7 @@ const drives = require('../system/drives');
 const machine = require('../system/machine');
 const { listProcesses, sampleCpuByProcess } = require('../system/processes');
 const sessionInfo = require('../system/session');
+const overlay = require('../overlay');
 
 /** Wraps a handler so a thrown error crosses IPC as a structured failure. */
 function handle(channel, fn) {
@@ -528,8 +529,13 @@ function register(state, mainWindow) {
     return dark;
   };
 
+  // The result of the most recent attempt to claim the summoning key, so both
+  // Settings and the overlay itself can report a chord that could not be bound.
+  let overlayHotkey = { ok: true, hotkey: overlay.currentHotkey(), why: null };
+
   const settingsPayload = () => ({
     ...state.settings.forRenderer(),
+    overlayHotkeyBound: { ...overlayHotkey, hotkey: overlay.currentHotkey() || overlayHotkey.hotkey },
     effective: {
       dark: nativeTheme.shouldUseDarkColors,
       systemDark: nativeTheme.shouldUseDarkColors && nativeTheme.themeSource === 'system',
@@ -567,7 +573,30 @@ function register(state, mainWindow) {
       if ('model' in patch.assistant) state.gemini.setModel(after.assistant.model);
     }
 
-    return settingsPayload();
+    // The overlay's key is claimed from the operating system, so a change has to
+    // be applied now rather than at the next launch — and whether the claim
+    // succeeded is part of the answer, because another application may already
+    // hold that chord and the user needs to be told rather than left pressing a
+    // key that does nothing.
+    if (patch && patch.overlay) {
+      if (after.overlay.enabled) {
+        if (!overlay.get()) overlay.create();
+        overlayHotkey = overlay.registerHotkey(after.overlay.hotkey, () => overlay.toggle());
+      } else {
+        overlay.destroy();
+        overlayHotkey = { ok: false, hotkey: after.overlay.hotkey, why: 'The overlay is switched off.' };
+      }
+    }
+
+    // Both windows are told. The overlay reads three of these — whether it is
+    // enabled, whether it listens on open, and whether it is listening for the
+    // wake phrase — and a change that only took effect at the next launch would
+    // be a switch that appears to do nothing.
+    const payload = settingsPayload();
+    send('settings:changed', payload);
+    const overlayWindow = overlay.get();
+    if (overlayWindow) overlayWindow.webContents.send('settings:changed', payload);
+    return payload;
   });
 
   // The OS theme can change while the app is open; when the choice is "match
@@ -987,6 +1016,219 @@ function register(state, mainWindow) {
       error: out.error,
       attachments: attachmentNotes,
     };
+  });
+
+  // ── the overlay panel ────────────────────────────────────────────────────
+  //
+  // A second window with its own conversation, over the same tools. Everything
+  // it can reach, the side panel can reach; the difference is where it appears
+  // and how it is asked. The safety model is untouched: the model proposes, the
+  // handlers below act only on a proposal the user approved, and every path is
+  // re-validated here rather than trusted from the renderer.
+
+  /** Whatever the renderer needs to draw itself before anything is asked. */
+  handle('overlay:status', async () => {
+    const g = state.gemini.status();
+    const caps = await converter.capabilities();
+    return {
+      assistantConfigured: !!g.configured,
+      model: g.model,
+      hotkey: overlay.currentHotkey(),
+      conversion: {
+        available: caps.available,
+        selfRendered: caps.selfRendered || [],
+        needsOfficeSuite: caps.needsOfficeSuite || [],
+        why: caps.why,
+      },
+      documentsIndexed: state.index.docIndexStats(),
+    };
+  });
+
+  handle('overlay:resize', async (height, { immediate = false } = {}) =>
+    overlay.resize(Number(height) || 0, { immediate: !!immediate }));
+
+  handle('overlay:hide', async () => overlay.hide());
+
+  /**
+   * The renderer reporting that it is bound and listening.
+   *
+   * Answers with whether the window is already visible, so a panel whose
+   * renderer finished starting up after it was summoned opens the way it would
+   * have if it had been ready in time.
+   */
+  handle('overlay:ready', async () => overlay.markReady());
+
+  /** Raised by the wake phrase rather than by the shortcut. */
+  handle('overlay:showFromWake', async () => {
+    const prefs = state.settings.values.overlay || {};
+    if (!prefs.enabled || !prefs.wakeWord) return false;
+    if (!overlay.get()) overlay.create();
+    return overlay.show({ reason: 'wake' });
+  });
+
+  handle('overlay:show', async () => {
+    if (!state.settings.values.overlay?.enabled) {
+      throw new Error('The overlay is switched off in Settings.');
+    }
+    if (!overlay.get()) overlay.create();
+    return overlay.show({ reason: 'settings' });
+  });
+
+  handle('overlay:reset', async () => {
+    state.overlayAgent?.reset();
+    state.overlayChoices.clear();
+    return true;
+  });
+
+  /**
+   * One question, asked of the overlay's own agent.
+   *
+   * Progress is pushed to the overlay window as it happens — which tool is
+   * running, how many documents have been read — because a question that reads
+   * four hundred files takes seconds, and a panel that shows a spinner for that
+   * long is a panel that looks broken.
+   */
+  const askOverlay = async (message) => {
+    if (!state.overlayAgent) throw new Error('The assistant is not available.');
+    const out = await state.overlayAgent.send(String(message || '').slice(0, 4000), {
+      onStage: (payload) => {
+        const win = overlay.get();
+        if (win) win.webContents.send('overlay:stage', payload);
+      },
+    });
+
+    if (out.plan) state.registerPlan(out.plan);
+    if (out.conversion) state.conversions.set(out.conversion.id, out.conversion);
+    // The offered set is remembered here, so that when the answer comes back the
+    // paths can be checked against what was actually offered rather than taken
+    // on the renderer's word.
+    if (out.choice) state.overlayChoices.set(out.choice.id, out.choice);
+
+    return {
+      reply: out.reply,
+      plan: out.plan ? out.plan.toJSON() : null,
+      conversion: out.conversion || null,
+      choice: out.choice || null,
+      toolCalls: out.toolCalls,
+      error: out.error,
+    };
+  };
+
+  handle('overlay:ask', async (message) => askOverlay(message));
+
+  /**
+   * The user's answer to "which of these did you mean".
+   *
+   * The renderer sends back ids of what it displayed; each is checked against
+   * the options that were actually offered for that question. A renderer that
+   * sent a path nobody was shown would be naming a file the user never saw, and
+   * that path is dropped rather than searched for.
+   */
+  handle('overlay:choose', async (choiceId, paths) => {
+    const choice = state.overlayChoices.get(String(choiceId || ''));
+    if (!choice) throw new Error('That question is no longer open.');
+
+    const offered = new Map(choice.options.map((o) => [roots.normalize(o.path), o]));
+    const picked = [];
+    for (const p of (paths || []).slice(0, 12)) {
+      const match = offered.get(roots.normalize(String(p || '')));
+      if (match) picked.push(match);
+    }
+    if (picked.length === 0) throw new Error('None of those files were among the ones offered.');
+
+    state.overlayChoices.delete(choice.id);
+
+    // Phrased as the user answering, because that is what happened. The model
+    // sees a normal turn of conversation naming absolute paths it already knows.
+    const answer = picked.length === 1
+      ? `I mean this one: ${picked[0].path}`
+      : `I mean these: ${picked.map((p) => p.path).join(', ')}`;
+    return askOverlay(answer);
+  });
+
+  /**
+   * Runs a conversion the assistant proposed and the user just approved.
+   *
+   * Only the proposal's id crosses the bridge. The paths live in the main
+   * process, which is what stops an approval of one conversion being redeemed
+   * for a different one.
+   */
+  handle('overlay:convert', async (conversionId, { onConflict = 'rename' } = {}) => {
+    const proposal = state.conversions.get(String(conversionId || ''));
+    if (!proposal) throw new Error('That conversion proposal is no longer available.');
+
+    const results = [];
+    for (const item of proposal.items) {
+      const win = overlay.get();
+      if (win) {
+        win.webContents.send('overlay:stage', {
+          stage: 'converting', message: `Converting ${path.basename(item.source)}…`,
+        });
+      }
+      try {
+        results.push(await converter.convert(item.source, { format: proposal.format, onConflict }));
+      } catch (err) {
+        results.push({ ok: false, source: item.source, error: err.message, code: err.code || null });
+      }
+    }
+    // Spent once, exactly as in the side panel: an approval is for one run.
+    state.conversions.delete(proposal.id);
+    return {
+      results,
+      converted: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+    };
+  });
+
+  /**
+   * "Save it somewhere else" — a native Save dialog, then a copy.
+   *
+   * A copy rather than a move: the file the conversion produced sits beside its
+   * source, where the user can find it again, and this adds a second one where
+   * they asked for it. Nothing is removed by saving.
+   */
+  handle('overlay:saveCopy', async (filePath) => {
+    const src = roots.assertInsideRoot(filePath, { mustExist: true });
+    const win = overlay.get();
+    const result = await dialog.showSaveDialog(win || mainWindow, {
+      title: 'Save a copy',
+      defaultPath: path.join(app.getPath('downloads'), path.basename(src)),
+      filters: [{ name: 'PDF', extensions: ['pdf'] }, { name: 'All files', extensions: ['*'] }],
+    });
+    if (result.canceled || !result.filePath) return { saved: false };
+
+    // The destination is wherever the user pointed the dialog, and a location
+    // they chose in a system dialog is a location they approved — the same
+    // reasoning the directory picker already relies on.
+    const dest = result.filePath;
+    await fsp.copyFile(src, dest);
+    return { saved: true, path: dest, bytes: (await fsp.stat(dest)).size };
+  });
+
+  handle('overlay:reveal', async (filePath) => {
+    const safe = roots.assertInsideRoot(filePath, { mustExist: true });
+    shell.showItemInFolder(safe);
+    return true;
+  });
+
+  /**
+   * Opens a file in whatever the system uses for it.
+   *
+   * The overlay only ever offers this for a PDF it has just produced or a
+   * document it found, and `openPath` hands off to the registered application
+   * rather than executing anything itself — but the extension is still checked,
+   * because "open" on a .exe is not opening, it is running.
+   */
+  handle('overlay:open', async (filePath) => {
+    const safe = roots.assertInsideRoot(filePath, { mustExist: true });
+    const ext = path.extname(safe).slice(1).toLowerCase();
+    const EXECUTABLE = ['exe', 'msi', 'bat', 'cmd', 'com', 'scr', 'ps1', 'sh', 'app', 'command'];
+    if (EXECUTABLE.includes(ext)) {
+      throw new Error(`${path.basename(safe)} is a program. The overlay does not run programs.`);
+    }
+    const problem = await shell.openPath(safe);
+    if (problem) throw new Error(problem);
+    return true;
   });
 
   // ── conversion ───────────────────────────────────────────────────────────

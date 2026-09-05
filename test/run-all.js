@@ -20,6 +20,7 @@ const NODE_SUITES = [
   ['spoken input to the assistant', 'voice.test.js'],
   ['video sub-clip detection', 'video.test.js'],
   ['document and video duplicates', 'content-dupes.test.js'],
+  ['searching inside documents', 'content-index.test.js'],
   // Drives whichever office suite is installed. Skips itself, loudly, on a
   // machine that has none rather than reporting a pass it did not earn.
   ['document conversion to PDF', 'convert.test.js'],
@@ -41,6 +42,10 @@ const ELECTRON_SUITES = [
   ['conversion, end to end', path.join('tools', 'e2e-convert.js')],
   // Walks every view and asks Chromium whether each control the user can see
   // actually has a listener bound to it. Nothing in this interface is inert.
+  // The overlay panel: the window, the morph, every refusal it relies on, the
+  // content search, and a real document converted to a real PDF. No model is
+  // called — see the note at the top of that file.
+  ['the overlay panel, end to end', path.join('tools', 'e2e-overlay.js')],
   ['every control in the interface', path.join('tools', 'e2e-ui-audit.js')],
 ];
 

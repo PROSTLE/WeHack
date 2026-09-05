@@ -12,6 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const { app, BrowserWindow } = require('electron');
 
+const { mainWindow } = require('./main-window');
 const FIXTURE = path.join(os.homedir(), '.nexafiles-files-e2e');
 let pass = 0, fail = 0;
 const out = [];
@@ -29,7 +30,7 @@ setTimeout(() => {
 
 app.whenReady().then(() => {
   const tick = setInterval(async () => {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow(BrowserWindow);
     if (!win || win.webContents.isLoading()) return;
     clearInterval(tick);
     await new Promise((r) => setTimeout(r, 1500));

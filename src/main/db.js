@@ -11,7 +11,7 @@
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 class Index {
   constructor(dbPath) {
@@ -201,6 +201,53 @@ class Index {
           PRIMARY KEY (path, size, mtimeMs)
         )
       `);
+    }
+
+    if (current < 5) {
+      // The searchable text of documents.
+      //
+      // `doc_text` above stores a SimHash and nothing else, which answers "are
+      // these two files saying the same thing" and cannot answer "which file
+      // talks about elephants". Answering that needs the words, so they are
+      // kept here — in SQLite's own full-text index, which ships inside the
+      // runtime and adds no dependency.
+      //
+      // Two tables rather than one because an FTS5 table cannot carry a useful
+      // primary key or be queried cheaply by path: `doc_fts` holds the words,
+      // `doc_bodies` holds the bookkeeping, and they are joined on rowid. The
+      // bookkeeping is keyed on path, size and mtime — the same freshness key
+      // the fingerprint caches use — so a file that has not changed is never
+      // read twice, and a file that has changed is re-read automatically.
+      d.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
+          name,
+          body,
+          tokenize = 'porter unicode61 remove_diacritics 2'
+        )
+      `);
+      // `pathKey` is the case-folded path and `path` is the one the disk
+      // actually spells. They are separate columns because they answer separate
+      // questions: Windows and macOS will hand back "/Users/x" and "/users/x"
+      // for the same file depending on which call produced it, so a lookup keyed
+      // on the display spelling silently misses and re-indexes the same document
+      // forever — which is exactly what happened before this column existed.
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS doc_bodies (
+          rowid      INTEGER PRIMARY KEY,
+          pathKey    TEXT NOT NULL UNIQUE,
+          path       TEXT NOT NULL,
+          name       TEXT NOT NULL,
+          size       INTEGER NOT NULL,
+          mtimeMs    REAL NOT NULL,
+          chars      INTEGER NOT NULL DEFAULT 0,
+          extension  TEXT,
+          method     TEXT,
+          note       TEXT,
+          ok         INTEGER NOT NULL DEFAULT 1,
+          indexedAt  TEXT NOT NULL
+        )
+      `);
+      d.exec(`CREATE INDEX IF NOT EXISTS idx_bodies_fresh ON doc_bodies(pathKey, size, mtimeMs)`);
     }
 
     d.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`)
@@ -406,6 +453,130 @@ class Index {
       }
     }
     return removed;
+  }
+
+  // ── document text, searchable ────────────────────────────────────────────
+  //
+  // Everything here is a measurement of a file that was actually opened and
+  // read. A path that has never been indexed is absent, and absent is reported
+  // as "not read yet" rather than as "contains nothing" — the difference
+  // matters, because the assistant is allowed to say the second and must never
+  // say it when it means the first.
+
+  /** True when this exact file, at this size and time, is already indexed. */
+  docBodyFresh(pathKey, size, mtimeMs) {
+    const row = this.db.prepare(
+      `SELECT rowid FROM doc_bodies WHERE pathKey = ? AND size = ? AND mtimeMs = ?`
+    ).get(pathKey, size, mtimeMs);
+    return !!row;
+  }
+
+  /**
+   * Stores one file's text.
+   *
+   * A file whose text could not be read is stored too, with `ok = 0` and the
+   * reason: without that row the indexer would re-open the same unreadable
+   * PDF on every single search, and the interface could never explain why a
+   * file it can see is not among the results.
+   */
+  putDocBody({ pathKey, path: filePath, name, size, mtimeMs, chars, extension, method, note, ok, body }) {
+    const key = pathKey || filePath;
+    const existing = this.db.prepare(`SELECT rowid FROM doc_bodies WHERE pathKey = ?`).get(key);
+    if (existing) {
+      this.db.prepare(`DELETE FROM doc_fts WHERE rowid = ?`).run(existing.rowid);
+      this.db.prepare(`DELETE FROM doc_bodies WHERE rowid = ?`).run(existing.rowid);
+    }
+    const info = this.db.prepare(
+      `INSERT INTO doc_fts (name, body) VALUES (?, ?)`
+    ).run(name, ok ? String(body || '') : '');
+    this.db.prepare(`
+      INSERT INTO doc_bodies
+        (rowid, pathKey, path, name, size, mtimeMs, chars, extension, method, note, ok, indexedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(Number(info.lastInsertRowid), key, filePath, name, size, mtimeMs,
+           chars || 0, extension || null, method || null, note || null,
+           ok ? 1 : 0, new Date().toISOString());
+  }
+
+  /**
+   * Full-text search over indexed documents.
+   *
+   * Ranked by bm25, which weighs a term by how rare it is across the corpus, so
+   * a file about elephants outranks one that mentions an elephant once in a
+   * shopping list. The name column is weighted more heavily than the body: a
+   * file called "elephants.docx" is a stronger signal than a paragraph.
+   *
+   * `snippet()` returns the matched words in their own sentence. That is the
+   * evidence — it is what lets the interface show why a file was returned
+   * instead of asking the user to take the ranking on trust.
+   */
+  searchDocBodies(matchExpression, { limit = 25 } = {}) {
+    return this.db.prepare(`
+      SELECT b.path, b.name, b.size, b.mtimeMs, b.extension, b.chars, b.method,
+             bm25(doc_fts, 8.0, 1.0) AS rank,
+             snippet(doc_fts, 1, '‹', '›', '…', 24) AS snippet
+      FROM doc_fts
+      JOIN doc_bodies b ON b.rowid = doc_fts.rowid
+      WHERE doc_fts MATCH ? AND b.ok = 1
+      ORDER BY rank
+      LIMIT ?
+    `).all(matchExpression, Math.min(Math.max(1, limit), 200));
+  }
+
+  /** The whole indexed text of one file, for a closer read than a snippet. */
+  docBodyFor(pathKey) {
+    return this.db.prepare(`
+      SELECT b.path, b.name, b.chars, b.method, b.note, b.ok, doc_fts.body
+      FROM doc_bodies b JOIN doc_fts ON doc_fts.rowid = b.rowid
+      WHERE b.pathKey = ?
+    `).get(pathKey) || null;
+  }
+
+  /** How much has been read, for an interface that must not overstate it. */
+  docIndexStats() {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS files,
+             SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS readable,
+             SUM(chars) AS chars,
+             MAX(indexedAt) AS lastIndexedAt
+      FROM doc_bodies
+    `).get();
+    return {
+      files: row?.files || 0,
+      readable: row?.readable || 0,
+      chars: row?.chars || 0,
+      lastIndexedAt: row?.lastIndexedAt || null,
+    };
+  }
+
+  /** Forgets one indexed document, by its case-folded path. */
+  deleteDocBody(pathKey) {
+    const row = this.db.prepare(`SELECT rowid FROM doc_bodies WHERE pathKey = ?`).get(pathKey);
+    if (!row) return false;
+    this.db.prepare(`DELETE FROM doc_fts WHERE rowid = ?`).run(row.rowid);
+    this.db.prepare(`DELETE FROM doc_bodies WHERE rowid = ?`).run(row.rowid);
+    return true;
+  }
+
+  /** Drops rows whose file is gone, so a deleted document stops being found. */
+  pruneDocBodies(exists = (p) => require('fs').existsSync(p)) {
+    const rows = this.db.prepare(`SELECT rowid, path FROM doc_bodies`).all();
+    let removed = 0;
+    for (const r of rows) {
+      if (exists(r.path)) continue;
+      this.db.prepare(`DELETE FROM doc_fts WHERE rowid = ?`).run(r.rowid);
+      this.db.prepare(`DELETE FROM doc_bodies WHERE rowid = ?`).run(r.rowid);
+      removed++;
+    }
+    return removed;
+  }
+
+  /** Forgets every indexed body. The Settings view offers this. */
+  clearDocBodies() {
+    const n = this.db.prepare(`SELECT COUNT(*) AS n FROM doc_bodies`).get()?.n || 0;
+    this.db.exec(`DELETE FROM doc_fts`);
+    this.db.exec(`DELETE FROM doc_bodies`);
+    return n;
   }
 
   // ── scans ────────────────────────────────────────────────────────────────

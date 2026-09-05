@@ -11,6 +11,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { app, BrowserWindow } = require('electron');
 
+const { mainWindow } = require('./main-window');
 const FIXTURE = path.join(os.homedir(), '.nexafiles-e2e-fixture');
 let pass = 0, fail = 0;
 const out = [];
@@ -24,7 +25,7 @@ setTimeout(() => { console.log(out.join('\n')); console.log('E2E TIMEOUT'); app.
 
 app.whenReady().then(() => {
   const tick = setInterval(async () => {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow(BrowserWindow);
     if (!win || win.webContents.isLoading()) return;
     clearInterval(tick);
     await new Promise((r) => setTimeout(r, 1200));

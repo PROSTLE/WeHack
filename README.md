@@ -91,6 +91,42 @@ Reported, never silently changed.
 **System visibility.** CPU, memory, and per-process usage. There is deliberately
 no "free up RAM" button; see *What this deliberately does not do*.
 
+**The overlay panel — Nexa.** One keystroke, from anywhere, over anything. It
+opens a floating panel at the edge of the screen, opens the microphone with it,
+and closes both together. Say *"open my blog on elephants and convert it to a
+PDF"* while you are in your mail client, and it searches the text inside your
+documents, finds the post, and offers you the PDF.
+
+The panel is one object that changes shape rather than a sequence of dialogs: it
+starts compact and listening, grows into a list when several of your files match,
+becomes a conversion slip when you pick one, and ends as a finished file with
+Save a copy, Show in folder and Open. Everything the side panel can do it can do,
+and nothing it cannot — it proposes, and you approve in the panel before a byte
+is written.
+
+By default it is **not always listening**: the microphone opens when the panel
+opens and closes when it closes, the same rule the assistant's composer already
+held to. Saying **"Hey Nexa"** can open it instead, and that is off until you
+switch it on, because it is the one feature here that holds the microphone open.
+The setting explains exactly what that costs before you turn it on, and *Known
+limitations* says it again.
+
+**Searching inside your files.** The scanner has always recorded every file's
+name and size, and `classify/extract.js` has always been able to read the real
+text out of `.docx`, `.pptx`, `.pdf`, `.rtf` and every plain format. What was
+missing was somewhere to put the words: `doc_text` stored a SimHash, which
+answers *are these two documents the same* and cannot answer *which of these is
+about elephants*. The words now go into SQLite's own full-text index, which ships
+inside the runtime and adds no dependency.
+
+It is a stemmed inverted index with bm25 ranking — not a model, not an embedding,
+and it is never described as one. A file is returned because it was opened, read
+and found to contain the words, and the passage that matched comes back with it,
+so the panel shows you *why* a file is on the list instead of asking you to trust
+a ranking. A file whose text could not be extracted is recorded as unread with
+the reason, because "nothing matched" and "never looked" must not be the same
+answer. Indexing is bounded by a time budget and says what it did not reach.
+
 ---
 
 ## The safety pipeline
@@ -229,6 +265,10 @@ src/main/
   system/machine.js         processor, memory, GPU, displays, power, versions
   llm/                      Gemini client, agent loop, tool implementations
   llm/attachments.js        dropped files, read as pixels or extracted text
+  overlay.js                the floating panel's window, placement and hotkey
+  search/content-index.js   full-text index over document text; bounded indexing
+  convert/index.js          conversion, engine chosen by what the file is
+  convert/builtin-pdf.js    Markdown/text/HTML/CSV/JSON → PDF, no office suite
   db.js                     SQLite index (node:sqlite)
 src/renderer/
   css/app.css               base system: palette, type, layout
@@ -238,6 +278,9 @@ src/renderer/
   js/settings.js            settings: theme, model, machine, access, storage
   js/explorer.js            the file manager: listing, selection, drag and drop
   js/treemap.js             squarified treemap, hue by category, fade by age
+  overlay.html              the floating panel's document
+  css/overlay.css           the panel: the aura, the glass, and the morph
+  js/overlay.js             the panel's state machine and its fit-to-content
   js/charts.js              inline-SVG chart primitives (no library, no network)
   js/dashboard.js           stat cards, capacity bars, session graph, recent list
   js/icons.js               the icon set and the four illustrations
@@ -415,6 +458,51 @@ states this scope explicitly rather than implying the check is complete.
 find the file specified"). The scanner falls back to `schtasks.exe`; if both
 fail it says the list is incomplete rather than showing a short list as the
 whole truth.
+
+**The first search on a large disk reads only part of it.** Content indexing has
+a time budget and a file cap, so a machine that has never been scanned will have
+its Documents, Desktop and Downloads read first and may not reach everything else
+before the budget runs out. The result says so — `indexComplete` is false and the
+assistant is instructed to report that the search covered what it had time to
+read — and the next search continues where it left off, because a file that has
+not changed is never read twice. Running a scan first makes the index use the
+scan's file list instead of walking, which is much faster.
+
+**Hidden folders are not searched.** The content index skips dot-directories and
+the usual machine-generated trees (`node_modules`, caches, `Library`, `AppData`).
+A document nobody can see in their file manager is not one they are searching
+for, and skipping them is most of why an unindexed home directory is searchable
+in seconds rather than minutes.
+
+**"Hey Nexa" holds the microphone open, and costs privacy to use.** It is off by
+default. With it on, the level is measured on this machine and nothing is
+recorded while the room is quiet — but when someone speaks near the microphone,
+that utterance is captured, and if it is short enough to be a wake phrase (under
+2.5 seconds) it is sent to Google to be transcribed and checked. Longer speech is
+discarded locally without being sent. There is no way around that without
+shipping a keyword-spotting model, and this project has no runtime dependencies
+to carry one; an on-device detector written from scratch would be unreliable
+enough that people would leave the panel open instead, which is worse. The
+operating system's own recording indicator stays lit whenever it is listening,
+NexaFiles cannot suppress it, and that is deliberately the signal relied on.
+
+**The wake phrase is matched generously.** "Nexa" is not a word speech models
+have strong priors for, so "Nexus", "next" and "Nexo" are all accepted after a
+leading "hey". Being strict would mean a wake word that mostly does not wake;
+requiring the "hey" is what stops the panel opening whenever the application is
+mentioned in conversation.
+
+**Word, PowerPoint and Excel still need an office suite.** NexaFiles renders
+Markdown, plain text, HTML, CSV, TSV, JSON and logs to PDF itself, through the
+browser it already contains, and names itself as the engine when it does. It
+cannot reproduce Word's layout without Word, and it does not try — a `.docx` on a
+machine with neither Office nor LibreOffice is reported as needing one rather
+than converted at lower fidelity and called done.
+
+**The built-in Markdown renderer is deliberately incomplete.** It covers
+headings, emphasis, code, links, images, lists, quotes and rules — what people
+write in a post. It is not CommonMark, does not claim to be, and does not render
+footnotes, reference links or tables.
 
 **Not tested on macOS or Linux.** The platform-specific code for both is written
 and reviewed, but every measurement in this README was taken on Windows 11

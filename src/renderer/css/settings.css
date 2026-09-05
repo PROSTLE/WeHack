@@ -239,3 +239,47 @@ select.set-input { cursor: pointer; }
   .set-facts, .tool-row { grid-template-columns: 1fr; gap: 3px; }
   .tool-row { padding: 10px 2px; }
 }
+
+/* ── a labelled checkbox ──────────────────────────────────────────────────
+ *
+ * The whole row is the label, so the sentence explaining what the switch does
+ * is also the thing you click to change it. A control whose explanation is not
+ * part of its hit area teaches people to aim at the box and never read the line.
+ */
+
+.set-check {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  cursor: pointer;
+  transition: border-color 140ms, background 140ms;
+}
+.set-check:hover { border-color: var(--line-firm); }
+
+.set-check input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.set-check span {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.set-check strong { color: var(--ink); font-weight: 580; }
+
+/* A setting with a cost attached. The only one so far is the wake word, which
+ * holds the microphone open — the border is there so the row reads differently
+ * from the switches beside it before a word of it is read. */
+.set-check.warn { border-color: var(--caution); background: var(--caution-wash); }
+.set-check.warn strong { color: var(--caution-ink); }
+.set-check.warn span { color: var(--caution-ink); }

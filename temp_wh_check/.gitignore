@@ -1,6 +1,0 @@
-node_modules/
-dist/
-*.db
-ai/venv/
-ai/model.pkl
-config.js

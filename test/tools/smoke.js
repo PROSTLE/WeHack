@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow } = require('electron');
 
+const { mainWindow } = require('./main-window');
 const rendererLogs = [];
 app.on('browser-window-created', (_e, win) => {
   win.webContents.on('console-message', (e) => {
@@ -26,7 +27,7 @@ function dump() {
 
 app.whenReady().then(() => {
   const tick = setInterval(async () => {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow(BrowserWindow);
     if (!win || win.webContents.isLoading()) return;
     clearInterval(tick);
     await new Promise((r) => setTimeout(r, 2500));

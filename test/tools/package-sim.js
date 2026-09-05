@@ -82,6 +82,7 @@ const probe = path.join(stage, '__probe.js');
 fs.writeFileSync(probe, `
 const path = require('path');
 const { app, BrowserWindow } = require('electron');
+const { mainWindow } = require('./main-window');
 const failures = [];
 app.on('browser-window-created', (_e, win) => {
   win.webContents.on('console-message', (e) => { if (e.level >= 2) failures.push(e.message); });
@@ -92,7 +93,7 @@ require(path.join(__dirname, 'main.js'));
 setTimeout(() => { console.log('PACKAGED-TIMEOUT'); app.exit(2); }, 30000);
 app.whenReady().then(() => {
   const t = setInterval(async () => {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow(BrowserWindow);
     if (!win || win.webContents.isLoading()) return;
     clearInterval(t);
     await new Promise(r => setTimeout(r, 2500));
