@@ -11,6 +11,19 @@
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+// The version this build writes into `meta.schema_version`.
+//
+// The numbered blocks in `_migrate` currently run up to 8; 9 is written because
+// a shipped build already wrote it, and lowering it would make every existing
+// database re-run block 8 on every start. The next migration must therefore be
+// `current < 10`, not `current < 9` — a block numbered 9 would never run for
+// anyone who has already used this build.
+//
+// The rule that matters, learned the expensive way: never add anything to a
+// numbered block that has already shipped. Databases that ran it will not run
+// it again, and they will carry a version number claiming work that was never
+// done. Additive columns on `files` are exempt because `_ensureFileColumns`
+// reconciles them against the live schema instead of against this number.
 const SCHEMA_VERSION = 9;
 
 class Index {
@@ -93,6 +106,7 @@ class Index {
           fileId      TEXT,                   -- dev:inode, for hardlink detection
           starred     INTEGER DEFAULT 0,
           tags        TEXT,
+          ${Index.FILE_COLUMNS.map(([c, decl]) => c + ' ' + decl + ',').join(' ')}
           UNIQUE(scanId, path)
         )
       `);
@@ -315,22 +329,10 @@ class Index {
       //
       // Added as columns rather than a side table because every row needs them
       // and they come free from the stat the walker already performs.
-      for (const [col, decl] of [
-        ['physicalSize', 'INTEGER'],
-        ['cloudProvider', 'TEXT'],
-        ['cloudPlaceholder', 'INTEGER NOT NULL DEFAULT 0'],
-        // A file on a mounted virtual drive (Google Drive's G:). Distinct from a
-        // placeholder: a placeholder is measurably absent, whereas this one's
-        // local footprint is not knowable at all, because the driver reports
-        // every file as fully allocated whether it is cached or not. Both mean
-        // "reading this may download it", which is what the guards check.
-        ['cloudStreamed', 'INTEGER NOT NULL DEFAULT 0'],
-      ]) {
-        if (!this._hasColumn('files', col)) {
-          d.exec(`ALTER TABLE files ADD COLUMN ${col} ${decl}`);
-        }
-      }
-      d.exec(`CREATE INDEX IF NOT EXISTS idx_files_cloud ON files(scanId, cloudPlaceholder)`);
+      //
+      // Both the columns and the index over them are created by
+      // `_ensureFileColumns`, not here — see the note there. This block is kept
+      // so the version sequence stays unbroken and readable.
     }
 
     if (current < 8) {
@@ -372,8 +374,172 @@ class Index {
       d.exec(`CREATE INDEX IF NOT EXISTS idx_cloud_size    ON cloud_files(size)`);
     }
 
+    // Additive columns on `files`, reconciled on every open rather than inside
+    // a version block.
+    //
+    // This exists because the version-gated form of it shipped broken. A build
+    // added `physicalSize`, `cloudProvider` and `cloudPlaceholder` under
+    // `current < 7`; a later build appended `cloudStreamed` to that same list.
+    // For anyone whose database had already run block 7, the block never ran
+    // again, so the column never arrived — while `schema_version` said it had.
+    // Every statement naming it then failed with `no such column: cloudStreamed`,
+    // which took out scanning, duplicates, leftovers and describe at once, and
+    // no rescan could repair it because the insert was one of the statements
+    // that failed.
+    //
+    // The version counter cannot detect that, because the whole premise of a
+    // version counter is that a numbered step, once run, is never revisited.
+    // So for `ALTER TABLE ... ADD COLUMN` — the one migration that is cheap to
+    // check and idempotent to apply — the schema itself is the authority rather
+    // than the number: what the table has is compared with what the code needs,
+    // every open, and the difference is added. A database that missed a column
+    // repairs itself the next time the application starts, whatever its
+    // recorded version says.
+    this._ensureFileColumns();
+
     d.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`)
       .run(String(SCHEMA_VERSION));
+  }
+
+  /**
+   * Every additive column `files` is expected to carry, with its declaration.
+   *
+   * A column belongs here when it can be added to an existing table with a
+   * default that is honest for rows written before it existed. `cloudStreamed`
+   * defaulting to 0 is honest in exactly that way: a row from an older scan was
+   * never assessed for streaming, and 0 means "not known to be streamed", which
+   * is what the guards need in order to stay conservative.
+   *
+   * Anything that needs a table rebuild or a backfill does NOT belong here —
+   * that is what the numbered blocks above are for.
+   */
+  static get FILE_COLUMNS() {
+    return [
+      ['physicalSize', 'INTEGER'],
+      ['cloudProvider', 'TEXT'],
+      ['cloudPlaceholder', 'INTEGER NOT NULL DEFAULT 0'],
+      // A file on a mounted virtual drive (Google Drive's G:). Distinct from a
+      // placeholder: a placeholder is measurably absent, whereas this one's
+      // local footprint is not knowable at all, because the driver reports
+      // every file as fully allocated whether it is cached or not. Both mean
+      // "reading this may download it", which is what the guards check.
+      ['cloudStreamed', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+  }
+
+  /**
+   * Brings `files` up to the column set the code expects. Idempotent, and
+   * cheap enough to run on every open: one PRAGMA against a table already in
+   * SQLite's schema cache.
+   *
+   * Records what it repaired on `this.repairedColumns` so a startup that had to
+   * fix a database can say so rather than silently papering over it.
+   */
+  _ensureFileColumns() {
+    this.repairedColumns = [];
+    if (!this._tableExists('files')) return;
+    // A freshly created table already lists these — see the `files` CREATE
+    // above, which builds its tail from the same list — so on a new install
+    // this loop finds nothing and stays silent. Anything it does report is a
+    // real database that had drifted from the code.
+    const have = new Set(
+      this.db.prepare(`PRAGMA table_info(files)`).all().map((c) => c.name)
+    );
+    for (const [col, decl] of Index.FILE_COLUMNS) {
+      if (have.has(col)) continue;
+      this.db.exec(`ALTER TABLE files ADD COLUMN ${col} ${decl}`);
+      this.repairedColumns.push(col);
+    }
+    if (this.repairedColumns.length) {
+      console.warn(
+        `[db] the file index was missing ${this.repairedColumns.join(', ')}; ` +
+        `added now. Rows from earlier scans carry the column default until the ` +
+        `next scan re-measures them.`
+      );
+    }
+    this._ensureCloudIndex();
+  }
+
+  /**
+   * Indexes over the cloud columns, kept partial.
+   *
+   * `idx_files_cloud` used to be `files(scanId, cloudPlaceholder)` -- every row
+   * in the table, keyed on a boolean that is 0 for very nearly all of them. An
+   * index like that can never be selective, but SQLite has no statistics here
+   * to know it, and reached for it constantly. The duplicate scanner's per-size
+   * lookup is `scanId = ? AND size = ? AND cloudPlaceholder = 0 AND
+   * cloudStreamed = 0`, and the planner answered it by walking every
+   * non-placeholder row in the scan -- about 1.1 million of them -- rather than
+   * seeking on `idx_files_size`.
+   *
+   * Measured on a real 1.2 million row index: 562 ms per lookup, once per size
+   * group. For a whole-scan search over 52,856 groups that is 8.25 hours of
+   * query time before a single byte is hashed, which is why the duplicate
+   * finder had become unusable on a large scan while still feeling fine on a
+   * small one -- the cost scales with the size of the index, not with the
+   * number of files being compared.
+   *
+   * The replacements are partial, and that is what fixes it from both ends.
+   * Each holds only the handful of rows it is for, so the queries that need
+   * them stay instant; and because their WHERE clauses do not cover
+   * `cloudPlaceholder = 0`, the planner *cannot* choose them for the duplicate
+   * lookups. The bad plan is gone by construction rather than by hoping ANALYZE
+   * has been run. Measured after: 5.5 s for that whole-scan search, and 60 MB
+   * smaller on disk.
+   *
+   * One index per query rather than one covering both, because SQLite will only
+   * use a partial index when the query's WHERE provably implies the index's.
+   * A single `WHERE cloudPlaceholder = 1 OR cloudStreamed = 1` was not matched
+   * against `cloudPlaceholder = 1`, and the placeholder tally silently went
+   * back to a full table scan -- 5.7 s, measured, which is how this was caught.
+   */
+  static get CLOUD_INDEXES() {
+    return [
+      // `placeholdersExcluded`: scanId, isDirectory, cloudPlaceholder = 1, size.
+      ['idx_files_placeholder',
+        'CREATE INDEX idx_files_placeholder ON files(scanId, size) '
+        + 'WHERE cloudPlaceholder = 1'],
+      // The same question asked of streamed files.
+      ['idx_files_streamed',
+        'CREATE INDEX idx_files_streamed ON files(scanId, size) '
+        + 'WHERE cloudStreamed = 1'],
+      // `cloudSummary`: grouped by provider over the rows that have one.
+      ['idx_files_provider',
+        'CREATE INDEX idx_files_provider ON files(scanId, cloudProvider) '
+        + 'WHERE cloudProvider IS NOT NULL'],
+    ];
+  }
+
+  /**
+   * Brings the cloud indexes into line with the definitions above, comparing
+   * the SQL SQLite recorded rather than trusting a version number -- for the
+   * reason `_ensureFileColumns` exists.
+   */
+  _ensureCloudIndex() {
+    this.rebuiltCloudIndex = false;
+
+    // The original offender. Dropped outright: nothing replaces it, because
+    // nothing ever needed an index on "this row is not in the cloud".
+    if (this.db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_files_cloud'`
+    ).get()) {
+      this.db.exec('DROP INDEX idx_files_cloud');
+      this.rebuiltCloudIndex = true;
+      console.warn(
+        '[db] dropped idx_files_cloud: it made every duplicate search scan the '
+        + 'whole file table. Replacing it with partial indexes.'
+      );
+    }
+
+    for (const [name, sql] of Index.CLOUD_INDEXES) {
+      const existing = this.db.prepare(
+        `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`
+      ).get(name);
+      if (existing && normaliseSql(existing.sql) === normaliseSql(sql)) continue;
+      if (existing) this.db.exec(`DROP INDEX ${name}`);
+      this.db.exec(sql);
+      this.rebuiltCloudIndex = true;
+    }
   }
 
   // ── recorded system metrics, scoped to the current boot session ──────────
@@ -1454,8 +1620,22 @@ class Index {
   }
 
   close() {
-    if (this.db) { this.db.close(); this.db = null; }
+    if (!this.db) return;
+    // SQLite's own recommendation for a connection that is about to close: it
+    // runs ANALYZE only on tables whose statistics are missing or stale, so it
+    // is usually a no-op and never the full 25 s a blanket ANALYZE costs on an
+    // index this size. Belt and braces alongside the partial index above --
+    // that removes today's bad plan by construction, this gives the planner
+    // real numbers so a future query does not fall into the same hole.
+    try { this.db.exec('PRAGMA optimize'); } catch { /* never worth failing a close over */ }
+    this.db.close();
+    this.db = null;
   }
+}
+
+/** Compares SQL text ignoring whitespace and case, for schema comparisons. */
+function normaliseSql(sql) {
+  return String(sql || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 /** Larger of two possibly-null timestamps. */

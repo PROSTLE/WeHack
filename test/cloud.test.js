@@ -87,6 +87,19 @@ ok('and so does a placeholder',
   cloud.wouldDownload({ cloudPlaceholder: true }) === true);
 ok('an ordinary local file would not',
   cloud.wouldDownload({ cloudPlaceholder: false, cloudStreamed: false }) === false);
+// The same rows as SQLite hands them back. SQLite has no boolean type, so a
+// flag written as `true` reads back as `1` -- and this guard used to compare
+// with `=== true`, which answered "no" for every row that came from the
+// database. "No" here means "go ahead and read it", so the bug pointed the
+// wrong way: it would have quietly downloaded the files it exists to protect.
+ok('a placeholder read back from the database counts too',
+  cloud.wouldDownload({ cloudPlaceholder: 1, cloudStreamed: 0 }) === true);
+ok('and a streamed one does',
+  cloud.wouldDownload({ cloudPlaceholder: 0, cloudStreamed: 1 }) === true);
+ok('while a local row from the database still does not',
+  cloud.wouldDownload({ cloudPlaceholder: 0, cloudStreamed: 0 }) === false);
+ok('and neither does a row that was never assessed',
+  cloud.wouldDownload({}) === false && cloud.wouldDownload(null) === false);
 // The OneDrive path must be untouched by all of this.
 ok('a real sync folder still measures its footprint',
   cloud.describeStorage(stats(1_053_417, 0), PROVIDER).storageKnown === true);
@@ -160,6 +173,30 @@ const cands = index.describeCandidates('s1', { imageExts: ['png'] });
 ok('describing does not send an online-only picture either',
   cands.length === 1 && !cands[0].path.includes('OneDrive'),
   cands.map((r) => r.path).join(','));
+
+// A file on a mounted virtual drive, put through `insertBatch` -- the same call
+// the scan controller makes with the rows the walker hands it, rather than a
+// hand-written INSERT. That distinction is the point: the walker computed
+// `streamed` correctly and then dropped it on the way into the row, so every
+// such file was recorded as an ordinary local one. Nothing caught it, because
+// every existing case here built its rows by hand and supplied the flag itself.
+index.insertBatch('s1', [{
+  path: 'G:\Drive\v.bin', name: 'v.bin', parent: 'G:\Drive', isDirectory: false,
+  size: 5000, mtimeMs: 1, atimeMs: 1, birthMs: 1, extension: 'bin',
+  type: 'binary', category: 'other', depth: 2, fileId: null,
+  physicalSize: null, cloudProvider: 'googledrive',
+  cloudPlaceholder: false, cloudStreamed: true,
+}]);
+const streamedRow = index.db.prepare(
+  `SELECT physicalSize, cloudStreamed FROM files WHERE path = 'G:\Drive\v.bin'`).get();
+ok('a streamed file is recorded as streamed', streamedRow.cloudStreamed === 1);
+ok('and its footprint stays unmeasured rather than being filled in',
+  streamedRow.physicalSize === null, String(streamedRow.physicalSize));
+ok('a duplicate scan will not read it either',
+  !index.filesOfSize('s1', 5000).some((r) => r.path.startsWith('G:')),
+  index.filesOfSize('s1', 5000).map((r) => r.path).join(','));
+ok('but it is there when explicitly asked for',
+  index.filesOfSize('s1', 5000, { includeCloud: true }).some((r) => r.path.startsWith('G:')));
 
 console.log('\n-- the plan says what a deletion really does --');
 const info = index.cloudInfoForPath('s1', 'C:\\Users\\HP\\OneDrive\\pic.png');

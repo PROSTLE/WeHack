@@ -20,6 +20,35 @@ app.whenReady().then(async()=>{
 
   ok('no listener window before the wake word is switched on', !wakeWindow.get());
 
+  // The listener will not arm without the speech model, and this suite runs in
+  // a profile that usually does not have it.
+  //
+  // Electron derives userData from the application name, and that name comes
+  // from the package.json beside the entry point. Started as `electron .` the
+  // name is "nexafiles" and the profile is the one the application really uses;
+  // started as `electron test/tools/wake-window.js` -- which is how every suite
+  // here is run -- the entry point is this file, there is no package.json
+  // beside it, and Electron falls back to its own default name. That profile
+  // has never downloaded the 40 MB model.
+  //
+  // `applyWakeSetting` then declines to arm, which is correct and is the whole
+  // point of that check. Reported as four failures, though, it read as "the
+  // wake word is broken" on a machine where it works -- so the missing
+  // prerequisite is named and the suite stops, the way the video suite does
+  // when ffmpeg is absent. A missing prerequisite and a broken feature must not
+  // look the same.
+  const model = await invoke('wake:modelStatus');
+  const modelReady = !!(model && (model.ready || (model.data && model.data.ready)));
+  if (!modelReady) {
+    console.log(out.join('\n'));
+    console.log(`\n  SKIP  the speech model is not in this profile (${app.getPath('userData')}), ` +
+      `so the listener cannot arm.`);
+    console.log('        Download it once in Settings, running the application normally, ' +
+      'to exercise this suite.');
+    app.exit(0);
+    return;
+  }
+
   await invoke('settings:set',{overlay:{wakeWord:true}});
 
   // Polled rather than slept at. The listener parses 5.8 MB of recogniser and

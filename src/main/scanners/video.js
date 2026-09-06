@@ -125,14 +125,43 @@ function runFrames(args, timeoutMs = 180000) {
     const proc = spawn('ffmpeg', args, { windowsHide: true });
     const chunks = [];
     let len = 0;
-    const timer = setTimeout(() => { proc.kill(); reject(new Error('ffmpeg timed out')); }, timeoutMs);
+    // Kept, not discarded. `-v error` means anything arriving here is a real
+    // complaint, and it is the only explanation of a failure available.
+    let errText = '';
+    let done = false;
+    const finish = (fn, arg) => { if (done) return; done = true; clearTimeout(timer); fn(arg); };
+    const timer = setTimeout(
+      () => { proc.kill(); finish(reject, new Error('ffmpeg timed out')); },
+      timeoutMs);
 
     proc.stdout.on('data', (d) => { chunks.push(d); len += d.length; });
-    proc.stderr.on('data', () => { /* -v error keeps this quiet; ignore */ });
-    proc.on('error', (e) => { clearTimeout(timer); reject(e); });
-    proc.on('close', () => {
-      clearTimeout(timer);
-      resolve(Buffer.concat(chunks, len));
+    proc.stderr.on('data', (d) => {
+      if (errText.length < 4096) errText += d.toString();
+    });
+    proc.on('error', (e) => finish(reject, e));
+    proc.on('close', (code) => {
+      // The exit code is checked rather than ignored, and this is the whole
+      // point of the function.
+      //
+      // ffmpeg writes frames to stdout as it decodes them, so a run that dies
+      // partway — an unreadable file, a corrupt stream, a codec this build
+      // cannot decode — still leaves a buffer full of real frames behind. The
+      // previous version resolved with whatever had arrived, so a decode that
+      // failed after twenty seconds of a three-minute film produced a
+      // perfectly well-formed twenty-second fingerprint, and nothing anywhere
+      // downstream could tell it apart from a complete one.
+      //
+      // What that produced was not a crash but a wrong answer: a clip really
+      // present in the part of the film that never got decoded was reported as
+      // "no match" — an absence stated as a finding, from evidence that was
+      // never gathered. Both callers already treat a throw properly (the
+      // coarse pass skips that timestamp, the dense pass falls back to coarse
+      // and counts the failure), so failing loudly here is what lets them.
+      if (code !== 0) {
+        const why = errText.trim().slice(-300) || `exit code ${code}`;
+        return finish(reject, new Error(`ffmpeg failed: ${why}`));
+      }
+      finish(resolve, Buffer.concat(chunks, len));
     });
   });
 }

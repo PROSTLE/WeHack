@@ -285,7 +285,15 @@ function wouldDownload(row) {
   // Both cases: a dehydrated placeholder definitely has to be fetched, and a
   // file on a virtual drive may have to be. Neither is safe to hash or describe
   // without the user having asked for the transfer.
-  return !!row && (row.cloudPlaceholder === true || row.cloudStreamed === true);
+  //
+  // Truthiness rather than `=== true`, because the two shapes this is handed
+  // do not agree on what a flag looks like. A row built by the walker carries
+  // real booleans; the same row read back out of SQLite carries 1 and 0,
+  // because SQLite has no boolean type. A strict comparison answered "no" for
+  // every row that came from the database — and "no" here means "go ahead and
+  // read it", so the failure would have been a silent download of exactly the
+  // files this guard exists to protect.
+  return !!row && (!!row.cloudPlaceholder || !!row.cloudStreamed);
 }
 
 module.exports = {

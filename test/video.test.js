@@ -70,6 +70,49 @@ async function pickSource() {
   ok('a structured frame hashes to non-zero', rampHash !== 0n);
   ok('identical frames have distance 0', V.hamming(rampHash, V.dHashFromGray(ramp, 0)) === 0);
 
+  // -- a decode that fails must not look like a decode that found nothing ----
+  //
+  // These run before the slow part, and without needing a source video, because
+  // the bug they guard is not about video at all: `runFrames` used to resolve
+  // with whatever bytes ffmpeg had written before it died. A file it could not
+  // open produced an empty fingerprint; a stream that broke twenty seconds in
+  // produced a twenty-second one. Both came back indistinguishable from an
+  // honest measurement, and the sub-clip search then reported "no match" -- an
+  // absence asserted from evidence that was never collected.
+  console.log('\n-- a failed decode is reported, not silently truncated --');
+  {
+    let threw = null;
+    try { await V.denseSignature(path.join(os.tmpdir(), 'nexa-no-such-video.mp4')); }
+    catch (e) { threw = e.message; }
+    ok('a file ffmpeg cannot open throws instead of returning no frames',
+      threw !== null, threw ? threw.slice(0, 60) : 'resolved');
+
+    const junk = path.join(os.tmpdir(), 'nexa-not-a-video.mp4');
+    fs.writeFileSync(junk, Buffer.alloc(4096, 3));
+    let threw2 = null;
+    try { await V.denseSignature(junk); } catch (e) { threw2 = e.message; }
+    ok('an unreadable stream throws too', threw2 !== null,
+      threw2 ? threw2.slice(0, 60) : 'resolved');
+    ok('and the error says what ffmpeg actually complained about',
+      /ffmpeg failed/.test(threw2 || ''), threw2 ? threw2.slice(0, 60) : '');
+    fs.rmSync(junk, { force: true });
+
+    // The other half: a real decode must still succeed. Generated here rather
+    // than found on disk, so this half runs on any machine.
+    const synth = path.join(os.tmpdir(), 'nexa-synth.mp4');
+    fs.rmSync(synth, { force: true });
+    await execFileP('ffmpeg', [
+      '-v', 'error', '-y', '-f', 'lavfi',
+      '-i', 'testsrc=size=320x240:rate=10:duration=6',
+      '-c:v', 'libx264', '-preset', 'ultrafast', synth,
+    ], { timeout: 60000, windowsHide: true });
+    const sig = await V.denseSignature(synth, { fps: 1 });
+    ok('a video that decodes cleanly still yields its frames',
+      sig.frames.length >= 4, `${sig.frames.length}`);
+    ok('and the seek-based pass still works', (await V.coarseSignature(synth, 6, 6)).length > 0);
+    fs.rmSync(synth, { force: true });
+  }
+
   const src = await pickSource();
   if (!src) {
     console.log('\n  SKIP  no video of at least 90 s found to test against.');

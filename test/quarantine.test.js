@@ -6,7 +6,7 @@ const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 const { Quarantine } = require('../src/main/safety/quarantine.js');
-const { hashFile } = require('../src/main/safety/fsops.js');
+const { hashFile, measure, mapLimit } = require('../src/main/safety/fsops.js');
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra = '') {
@@ -137,6 +137,60 @@ async function run(label, qBase, workDir) {
       cross, path.join(tmp, 'nexafiles-work2'));
     await fsp.rm(cross, { recursive: true, force: true });
   }
+
+  // -- measure(), which was rewritten to overlap its stats -------------------
+  //
+  // It used to await one lstat at a time; it now walks a level at a time with
+  // sixty-four in flight, which took the leftover sweep from 218 s to 7.6 s on
+  // a real machine. That is a change to traversal order, and reorderings are
+  // exactly what quietly drops or double-counts a file -- so the totals are
+  // checked against a fixture whose answer is known by construction.
+  console.log('\n-- measuring a tree --');
+  const mRoot = path.join(os.tmpdir(), 'nexafiles-measure-fixture');
+  await fsp.rm(mRoot, { recursive: true, force: true });
+  await fsp.mkdir(path.join(mRoot, 'a', 'b', 'c'), { recursive: true });
+  await fsp.mkdir(path.join(mRoot, 'd'), { recursive: true });
+  await fsp.mkdir(path.join(mRoot, 'empty'), { recursive: true });
+  await fsp.writeFile(path.join(mRoot, 'top.bin'), Buffer.alloc(100));
+  await fsp.writeFile(path.join(mRoot, 'a', 'one.bin'), Buffer.alloc(200));
+  await fsp.writeFile(path.join(mRoot, 'a', 'b', 'two.bin'), Buffer.alloc(300));
+  await fsp.writeFile(path.join(mRoot, 'a', 'b', 'c', 'three.bin'), Buffer.alloc(400));
+  await fsp.writeFile(path.join(mRoot, 'd', 'four.bin'), Buffer.alloc(500));
+
+  const m = await measure(mRoot);
+  ok('every byte is counted once', m.bytes === 1500, `${m.bytes}`);
+  ok('every file is counted once', m.files === 5, `${m.files}`);
+  // a, a/b, a/b/c, d, empty -- the root itself is not counted.
+  ok('every directory is counted once, excluding the root', m.dirs === 5, `${m.dirs}`);
+
+  const single = await measure(path.join(mRoot, 'top.bin'));
+  ok('a plain file measures as itself', single.bytes === 100 && single.files === 1);
+
+  // Deep enough that a level-at-a-time loop with a bug would stop early.
+  let deep = path.join(mRoot, 'deep');
+  await fsp.mkdir(deep);
+  for (let i = 0; i < 40; i++) {
+    deep = path.join(deep, 'x');
+    await fsp.mkdir(deep);
+    await fsp.writeFile(path.join(deep, 'f.bin'), Buffer.alloc(10));
+  }
+  const md = await measure(path.join(mRoot, 'deep'));
+  ok('a forty-level tree is descended to the bottom',
+    md.files === 40 && md.bytes === 400 && md.dirs === 40,
+    `${md.files} files, ${md.bytes} bytes, ${md.dirs} dirs`);
+  await fsp.rm(mRoot, { recursive: true, force: true });
+
+  // The limiter itself: order preserved, nothing dropped, cap respected.
+  let liveNow = 0, peak = 0;
+  const seen = await mapLimit([...Array(500).keys()], 8, async (n) => {
+    liveNow++; peak = Math.max(peak, liveNow);
+    await new Promise((r) => setTimeout(r, n % 3));
+    liveNow--;
+    return n * 2;
+  });
+  ok('mapLimit returns results in input order, none missing',
+    seen.length === 500 && seen.every((v, i) => v === i * 2));
+  ok('and never exceeds its concurrency limit', peak <= 8, `peak ${peak}`);
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);

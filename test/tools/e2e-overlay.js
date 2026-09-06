@@ -127,12 +127,61 @@ app.whenReady().then(() => {
       ok('converting an unknown proposal is refused',
         badConvert !== 'ALLOWED', badConvert);
 
-      const outside = path.join(os.tmpdir(), 'nexafiles-outside-root.txt');
-      fs.writeFileSync(outside, 'not in an approved root');
-      const badReveal = await js(`window.nexa.overlay.reveal(${JSON.stringify(outside)})
-        .then(() => 'ALLOWED').catch((e) => e.message)`);
-      ok('revealing a file outside every approved root is refused',
-        badReveal !== 'ALLOWED', badReveal);
+      // The path has to be chosen against the roots this machine has actually
+      // approved, not assumed.
+      //
+      // This used to write into os.tmpdir(), which on Windows sits inside
+      // %USERPROFILE% -- an approved root on any machine where the user has
+      // scanned their home folder. The reveal was then allowed, correctly, and
+      // the test reported a failed refusal: it failed on exactly the
+      // configuration a real user has, and passed only on a machine that had
+      // approved nothing. A guard test that inverts like that is worse than no
+      // test, because the failure looks like a security hole and the pass means
+      // nothing.
+      const roots = require(path.join(__dirname, '..', '..', 'src', 'main', 'security', 'roots.js'));
+      // Ordered by how likely each is to be writable without elevation. The
+      // first two sit beside a root rather than under it, which is what makes
+      // them outside it; the last two are fallbacks for a machine laid out
+      // differently, and need permissions an ordinary account may not have.
+      const NAME = 'nexafiles-outside-root-test.txt';
+      const candidates = [
+        path.join(os.tmpdir(), NAME),
+        // The project's parent: `…/NexaFiles` may be approved, `…/` is not.
+        path.join(path.dirname(process.cwd()), NAME),
+        process.env.ProgramData ? path.join(process.env.ProgramData, NAME) : null,
+        path.join(path.dirname(os.homedir()), NAME),
+        path.join(path.parse(process.cwd()).root, NAME),
+      ].filter(Boolean);
+      const isOutside = (c) => {
+        try { roots.assertInsideRoot(c); return false; } catch { return true; }
+      };
+      // Writable as well as outside: if the file cannot be created, the reveal
+      // is refused for not existing, and the test passes without ever
+      // exercising the root check it is named after.
+      const writable = (c) => {
+        try { fs.writeFileSync(c, 'not in an approved root'); return true; }
+        catch { return false; }
+      };
+      const outside = candidates.filter(isOutside).find(writable)
+        || candidates.find(isOutside);
+      if (!outside) {
+        // Everything writable here is inside an approved root, so the question
+        // cannot be posed. Said out loud rather than passed silently.
+        ok('a path outside every approved root could be found to test with', false,
+          `approved: ${roots.listRoots().map((r) => r.path || r).join(', ')}`);
+      } else {
+        const wrote = fs.existsSync(outside);
+        const badReveal = await js(`window.nexa.overlay.reveal(${JSON.stringify(outside)})
+          .then(() => 'ALLOWED').catch((e) => e.message)`);
+        ok('revealing a file outside every approved root is refused',
+          badReveal !== 'ALLOWED', `${badReveal} (${outside})`);
+        // Only meaningful when the file is really there; otherwise "does not
+        // exist" is a refusal for the wrong reason and is reported as such.
+        ok('and refused for being outside a root, not for being absent',
+          wrote && !/does not exist/i.test(String(badReveal)),
+          wrote ? String(badReveal) : 'could not create a file outside any root');
+        if (wrote) fs.rmSync(outside, { force: true });
+      }
 
       const program = path.join(docs, 'installer.exe');
       fs.writeFileSync(program, 'MZ not really');
@@ -147,7 +196,7 @@ app.whenReady().then(() => {
       // for the reason given at the top of this file.
       const contentIndex = require(path.join(
         __dirname, '..', '..', 'src', 'main', 'search', 'content-index.js'));
-      const roots = require(path.join(__dirname, '..', '..', 'src', 'main', 'security', 'roots.js'));
+      // `roots` is already required above, for the reveal refusal.
       const { Index } = require(path.join(__dirname, '..', '..', 'src', 'main', 'db.js'));
       const index = new Index(path.join(app.getPath('userData'), 'nexafiles_index.db')).open();
 
@@ -261,8 +310,20 @@ app.whenReady().then(() => {
       ok('it refuses the word on its own, and the word in a sentence',
         wake.refuses.every((r) => r === false), JSON.stringify(wake.refuses));
 
+      // Asserted against the shipped default, not against whatever this
+      // machine currently has stored. The claim being made is "off until
+      // switched on" -- a statement about what a new install does. Reading it
+      // from the live settings instead tested whether the person running the
+      // suite happens to use the wake word, and failed if they do, which is
+      // both a false alarm and a nudge to switch a feature off to make a test
+      // pass.
+      const { defaults } = require(path.join(__dirname, '..', '..', 'src', 'main', 'settings.js'));
+      ok('the wake word is off until switched on',
+        defaults().overlay.wakeWord === false);
+      // The live value is still worth reporting, because the assertions above
+      // about listening behaviour are read against this machine's state.
       const settings = await js(`window.nexa.settings.get()`);
-      ok('the wake word is off until switched on', settings.overlay.wakeWord === false);
+      out.push(`  ....  wake word is currently ${settings.overlay.wakeWord ? 'on' : 'off'} on this machine`);
       ok('the panel is on by default', settings.overlay.enabled === true);
       ok('and opens its microphone with itself', settings.overlay.listenOnOpen === true);
 

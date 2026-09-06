@@ -18,11 +18,16 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
-const { hashFile, hashRange } = require('../safety/fsops');
+const { hashFile, hashRange, mapLimit } = require('../safety/fsops');
 const { CATEGORY } = require('../classify/rules');
 const video = require('./video');
 
 const SAMPLE_BYTES = 4096;
+
+// How many candidate files to sample at once. Lower than the 64 used for stats
+// because these reads carry data rather than just metadata, and the point is to
+// keep the disk queue busy, not to thrash it.
+const READ_CONCURRENCY = 16;
 
 // ── Tier 1: exact duplicates ───────────────────────────────────────────────
 
@@ -67,20 +72,31 @@ async function findExactDuplicates(index, scanId, {
 
     // Step 2. Cheap discriminator: first and last 4 KB. This eliminates almost
     // all same-size non-duplicates for the cost of two small reads.
+    //
+    // The reads run several at a time. Each is two 4 KB reads whose cost is
+    // almost entirely waiting on the disk, and awaiting them one file after
+    // another left the queue empty between each -- the same latency-bound
+    // pattern the walker had. The grouping below is by content hash, so the
+    // order results arrive in cannot affect which files end up together.
     const bySample = new Map();
-    for (const f of unique) {
-      if (shouldCancel()) break;
+    const sampled = await mapLimit(unique, READ_CONCURRENCY, async (f) => {
+      if (shouldCancel()) return null;
       try {
         const head = await hashRange(f.path, 0, Math.min(SAMPLE_BYTES, sg.size));
         const tailStart = Math.max(0, sg.size - SAMPLE_BYTES);
         const tail = sg.size > SAMPLE_BYTES
           ? await hashRange(f.path, tailStart, sg.size - tailStart)
           : head;
-        stats.sampled++;
-        const key = head + ':' + tail;
-        if (!bySample.has(key)) bySample.set(key, []);
-        bySample.get(key).push(f);
-      } catch { /* unreadable; leave it out rather than guess */ }
+        return { f, key: head + ':' + tail };
+      } catch {
+        return null;   // unreadable; leave it out rather than guess
+      }
+    });
+    for (const r of sampled) {
+      if (!r) continue;
+      stats.sampled++;
+      if (!bySample.has(r.key)) bySample.set(r.key, []);
+      bySample.get(r.key).push(r.f);
     }
 
     // Step 3. Only now, for survivors, the full hash.

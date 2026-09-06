@@ -399,6 +399,14 @@ async function findLeftovers({
   const findings = [];
   const roots = candidateRoots();
 
+  const report = (current) => onProgress({
+    phase: 'leftovers',
+    ...stats,
+    examined: stats.directoriesExamined,
+    found: findings.length,
+    current,
+  });
+
   for (const root of roots) {
     if (shouldCancel()) break;
     let entries;
@@ -422,6 +430,19 @@ async function findLeftovers({
       const dirName = entry.name;
       const full = path.join(root.dir, dirName);
       stats.directoriesExamined++;
+
+      // Reported for every directory, not only for the ones that become
+      // findings. Most of this sweep is spent on folders that are ruled out,
+      // and on measuring the few that are not — a 9 GB package cache takes
+      // real time to add up. Emitting only on a finding left the interface
+      // showing a motionless counter for minutes at a stretch, which reads as
+      // a hang, and the honest signal is cheap: this is the folder being
+      // looked at right now.
+      //
+      // `examined` duplicates `directoriesExamined` because that is the name
+      // the progress line reads; without it the count rendered as zero for the
+      // whole sweep however many folders had actually been gone through.
+      report(full);
 
       if (SHARED_OR_SYSTEM.has(dirName.toLowerCase())) {
         stats.skippedShared++;
@@ -522,7 +543,7 @@ async function findLeftovers({
         evidence: evidenceParts.join(' '),
       });
 
-      onProgress({ phase: 'leftovers', ...stats, current: full });
+      report(full);
     }
   }
 
